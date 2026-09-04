@@ -1,0 +1,34 @@
+{
+  "name": "botnext-arbrain-sync",
+  "version": "1.0.0",
+  "description": "Integração BotNext + ArBrain para sincronização de dados e automação de pedidos.",
+  "main": "dist/server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "scheduler": "tsx src/scheduler.ts",
+    "worker:botnext": "tsx src/workers/botnext-webhook-worker.ts",
+    "worker:botnext:watch": "tsx watch src/workers/botnext-webhook-worker.ts",
+    "worker:botnext:start": "node dist/workers/botnext-webhook-worker.js"
+  },
+  "keywords": [],
+  "author": "Harry Sousa",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^6.12.0",
+    "bullmq": "^6.3.0",
+    "dotenv": "^17.2.1",
+    "ioredis": "^6.0.0",
+    "node-cron": "^4.6.0",
+    "openai": "^7.8.0",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "prisma": "^6.12.0"
+  }
+}

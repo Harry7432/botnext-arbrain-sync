@@ -1,0 +1,83 @@
+import { Prisma } from "@prisma/client";
+
+import { prisma } from "../../database/prisma.js";
+
+type SalvarEventoBotnextParams = {
+  eventType: string;
+  externalMessageId: string;
+  companyId: string;
+  sessionId: string | null;
+  messageType: string | null;
+  direction: string | null;
+  senderPhone: string | null;
+  recipientPhone: string | null;
+  messageText: string | null;
+  eventDate: Date | null;
+  payload: Prisma.InputJsonValue;
+};
+
+export type ResultadoPersistenciaWebhook = {
+  persistido: boolean;
+  duplicado: boolean;
+};
+
+export async function salvarEventoBotnext(
+  params: SalvarEventoBotnextParams,
+): Promise<ResultadoPersistenciaWebhook> {
+  const tenant = await prisma.tenant.findUnique({
+    where: {
+      slug: "lrc",
+    },
+    select: {
+      id: true,
+      active: true,
+    },
+  });
+
+  if (!tenant) {
+    throw new Error("Tenant LRC não encontrado.");
+  }
+
+  if (!tenant.active) {
+    throw new Error("Tenant LRC está inativo.");
+  }
+
+  try {
+    await prisma.botnextWebhookEvent.create({
+      data: {
+        tenantId: tenant.id,
+        eventType: params.eventType,
+        externalMessageId: params.externalMessageId,
+        companyId: params.companyId,
+        sessionId: params.sessionId,
+        messageType: params.messageType,
+        direction: params.direction,
+        senderPhone: params.senderPhone,
+        recipientPhone: params.recipientPhone,
+        messageText: params.messageText,
+        eventDate: params.eventDate,
+        payload: params.payload,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    return {
+      persistido: true,
+      duplicado: false,
+    };
+  } catch (error: unknown) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      return {
+        persistido: false,
+        duplicado: true,
+      };
+    }
+
+    throw error;
+  }
+}

@@ -1,0 +1,45 @@
+# Dependências
+node_modules/
+
+# Variáveis e credenciais
+.env
+.env.*
+!.env.example
+
+# Compilação
+dist/
+build/
+.next/
+out/
+
+# Testes
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Arquivos temporários
+tmp/
+temp/
+.cache/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
+
+# Bancos locais
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# TypeScript
+*.tsbuildinfo

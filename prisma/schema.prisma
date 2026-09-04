@@ -1,0 +1,453 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SyncRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+model Tenant {
+  id            String  @id @default(uuid()) @db.Uuid
+  name          String
+  slug          String  @unique
+  arbrainDataId Int     @map("arbrain_data_id")
+  active        Boolean @default(true)
+
+  clientes             Cliente[]
+  produtos             Produto[]
+  cervejas             Cerveja[]
+  pagamentos           Pagamento[]
+  syncRuns             SyncRun[]
+  syncCursors          SyncCursor[]
+  bancos               Banco[]
+  empresas             Empresa[]
+  botnextWebhookEvents BotnextWebhookEvent[]
+  botnextAccounts      BotnextAccount[]
+  botnextConversations BotnextConversation[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("tenants")
+}
+
+model Cliente {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+
+  tipo                      String?
+  identificador             String?
+  numeroDocumento           String? @map("numero_documento")
+  razaoSocial               String? @map("razao_social")
+  nomeFantasia              String? @map("nome_fantasia")
+  clienteConsumidorFinal    Boolean @default(false) @map("cliente_consumidor_final")
+  inscricaoEstadual         String? @map("inscricao_estadual")
+  modalidade                String?
+  uf                        String?
+  cep                       String?
+  cidade                    String?
+  bairro                    String?
+  logradouro                String?
+  numero                    String?
+  complemento               String?
+  telefone                  String?
+  celular                   String?
+  email                     String?
+  nomeResponsavel           String? @map("nome_responsavel")
+  diaVisitaPrimario         String? @map("dia_visita_primario")
+  diaVisitaSecundario       String? @map("dia_visita_secundario")
+  periodicidadeDaVisita     String? @map("periodicidade_da_visita")
+  ordenacaoDaVisita         String? @map("ordenacao_da_visita")
+  indexSequenciamentoVisita Int?    @map("index_sequenciamento_visita")
+  informacoesComplementares String? @map("informacoes_complementares")
+  dataNascimento            String? @map("data_nascimento")
+  descontoPadrao            Float   @default(0) @map("desconto_padrao")
+  limiteDeCredito           Float   @default(0) @map("limite_de_credito")
+  segmentacao               String?
+  idGrupoCliente            String? @map("id_grupo_cliente")
+  idTabelaPrecoPrimaria     String? @map("id_tabela_preco_primaria")
+  idTabelaPrecoSecundaria   String? @map("id_tabela_preco_secundaria")
+  idCondicaoPagamentoPadrao String? @map("id_condicao_pagamento_padrao")
+  idVendedor                String? @map("id_vendedor")
+  clienteAtivo              Boolean @default(false) @map("cliente_ativo")
+  clienteBloqueado          Boolean @default(false) @map("cliente_bloqueado")
+  preCadastro               Boolean @default(false) @map("pre_cadastro")
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botnextWebhookEvents BotnextWebhookEvent[]
+  botnextConversations BotnextConversation[]
+
+  @@unique([tenantId, arbrainId])
+  @@unique([tenantId, sku])
+  @@index([tenantId, clienteAtivo])
+  @@index([tenantId, clienteBloqueado])
+  @@index([tenantId, diaVisitaPrimario])
+  @@index([tenantId, diaVisitaSecundario])
+  @@map("clientes")
+}
+
+model Produto {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+  nome      String
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, arbrainId])
+  @@unique([tenantId, sku])
+  @@index([tenantId, nome])
+  @@map("produtos")
+}
+
+model Cerveja {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+  nome      String
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, arbrainId])
+  @@unique([tenantId, sku])
+  @@index([tenantId, nome])
+  @@map("cervejas")
+}
+
+model Pagamento {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+  nome      String
+
+  possuiVinculoBancario Boolean @map("possui_vinculo_bancario")
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, arbrainId])
+  @@index([tenantId, sku])
+  @@index([tenantId, nome])
+  @@index([tenantId, possuiVinculoBancario])
+  @@map("pagamentos")
+}
+
+model Banco {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+  nome      String
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, arbrainId])
+  @@index([tenantId, sku])
+  @@index([tenantId, nome])
+  @@map("bancos")
+}
+
+model SyncRun {
+  id       String        @id @default(uuid()) @db.Uuid
+  tenantId String        @map("tenant_id") @db.Uuid
+  entity   String
+  status   SyncRunStatus @default(RUNNING)
+
+  startedAt  DateTime  @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+
+  totalRecords     Int @default(0) @map("total_records")
+  processedRecords Int @default(0) @map("processed_records")
+  changedRecords   Int @default(0) @map("changed_records")
+  unchangedRecords Int @default(0) @map("unchanged_records")
+  errorCount       Int @default(0) @map("error_count")
+
+  errorMessage String? @map("error_message") @db.Text
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  errors SyncError[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, entity, startedAt])
+  @@index([status])
+  @@map("sync_runs")
+}
+
+model SyncError {
+  id        String @id @default(uuid()) @db.Uuid
+  syncRunId String @map("sync_run_id") @db.Uuid
+
+  externalId String? @map("external_id")
+  message    String  @db.Text
+  details    Json?
+
+  syncRun SyncRun @relation(fields: [syncRunId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([syncRunId])
+  @@map("sync_errors")
+}
+
+model SyncCursor {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  entity   String
+  cursor   String?
+
+  lastSuccessfulRunAt DateTime? @map("last_successful_run_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, entity])
+  @@map("sync_cursors")
+}
+
+model Empresa {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  arbrainId String @map("arbrain_id")
+  sku       Int
+  nome      String
+
+  syncedAt    DateTime @map("synced_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+  payloadHash String?  @map("payload_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, arbrainId])
+  @@unique([tenantId, sku])
+  @@index([tenantId, nome])
+  @@map("empresas")
+}
+
+model BotnextAccount {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  companyId    String  @unique @map("company_id") @db.Uuid
+  name         String
+  channelPhone String? @map("channel_phone")
+  active       Boolean @default(true)
+
+  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  webhookEvents BotnextWebhookEvent[]
+  conversations BotnextConversation[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, active])
+  @@map("botnext_accounts")
+}
+
+enum BotnextWebhookStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+model BotnextWebhookEvent {
+  id               String  @id @default(uuid()) @db.Uuid
+  tenantId         String  @map("tenant_id") @db.Uuid
+  clienteId        String? @map("cliente_id") @db.Uuid
+  botnextAccountId String? @map("botnext_account_id") @db.Uuid
+
+  eventType         String  @map("event_type")
+  externalMessageId String  @map("external_message_id")
+  companyId         String  @map("company_id")
+  sessionId         String? @map("session_id")
+
+  messageType    String? @map("message_type")
+  direction      String?
+  senderPhone    String? @map("sender_phone")
+  recipientPhone String? @map("recipient_phone")
+  messageText    String? @map("message_text") @db.Text
+
+  eventDate DateTime? @map("event_date")
+  payload   Json
+
+  status       BotnextWebhookStatus @default(RECEIVED)
+  processedAt  DateTime?            @map("processed_at")
+  errorMessage String?              @map("error_message") @db.Text
+
+  tenant              Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente             Cliente?                    @relation(fields: [clienteId], references: [id], onDelete: SetNull)
+  BotnextAccount      BotnextAccount?             @relation(fields: [botnextAccountId], references: [id])
+  conversationMessage BotnextConversationMessage?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, companyId, eventType, externalMessageId])
+  @@index([tenantId, status])
+  @@index([tenantId, sessionId])
+  @@index([tenantId, clienteId])
+  @@index([senderPhone])
+  @@index([createdAt])
+  @@index([botnextAccountId])
+  @@map("botnext_webhook_events")
+}
+
+enum BotnextConversationStatus {
+  ACTIVE
+  WAITING_CUSTOMER
+  WAITING_CONFIRMATION
+  HUMAN_HANDOFF
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum BotnextConversationMessageRole {
+  CUSTOMER
+  ASSISTANT
+  SYSTEM
+  HUMAN
+}
+
+enum BotnextConversationIntent {
+  FAZER_PEDIDO
+  NAO_DESEJA_PEDIDO
+  DUVIDA
+  ATENDIMENTO_HUMANO
+  ALTERACAO_CADASTRAL
+  RECLAMACAO
+  FORA_DE_CONTEXTO
+}
+
+enum BotnextRoutingAction {
+  INICIAR_PEDIDO
+  ENCERRAR_SEM_PEDIDO
+  RESPONDER_DUVIDA
+  ENCAMINHAR_ATENDIMENTO_HUMANO
+  SOLICITAR_MAIS_CONTEXTO
+}
+
+model BotnextConversation {
+  id               String  @id @default(uuid()) @db.Uuid
+  tenantId         String  @map("tenant_id") @db.Uuid
+  clienteId        String? @map("cliente_id") @db.Uuid
+  botnextAccountId String  @map("botnext_account_id") @db.Uuid
+
+  sessionId String                    @map("session_id")
+  status    BotnextConversationStatus @default(ACTIVE)
+
+  intent               BotnextConversationIntent?
+  intentConfidence     Float?                     @map("intent_confidence")
+  intentUpdatedAt      DateTime?                  @map("intent_updated_at")
+  requiresHumanHandoff Boolean                    @default(false) @map("requires_human_handoff")
+
+  lastMessageAt DateTime  @default(now()) @map("last_message_at")
+  closedAt      DateTime? @map("closed_at")
+
+  tenant         Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente        Cliente?                     @relation(fields: [clienteId], references: [id], onDelete: SetNull)
+  botnextAccount BotnextAccount               @relation(fields: [botnextAccountId], references: [id])
+  messages       BotnextConversationMessage[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([botnextAccountId, sessionId])
+  @@index([tenantId, status])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, intent])
+  @@index([lastMessageAt])
+  @@map("botnext_conversations")
+}
+
+model BotnextConversationMessage {
+  id                String  @id @default(uuid()) @db.Uuid
+  conversationId    String  @map("conversation_id") @db.Uuid
+  webhookEventId    String? @unique @map("webhook_event_id") @db.Uuid
+  externalMessageId String? @map("external_message_id")
+
+  role        BotnextConversationMessageRole
+  messageType String?                        @map("message_type")
+  text        String?                        @db.Text
+  eventDate   DateTime?                      @map("event_date")
+
+  detectedIntent        BotnextConversationIntent? @map("detected_intent")
+  intentConfidence      Float?                     @map("intent_confidence")
+  intentReason          String?                    @map("intent_reason") @db.Text
+  requiresHumanHandoff  Boolean?                   @map("requires_human_handoff")
+  classificationModel   String?                    @map("classification_model")
+  classificationVersion String?                    @map("classification_version")
+  classifiedAt          DateTime?                  @map("classified_at")
+
+  routingAction  BotnextRoutingAction?      @map("routing_action")
+  routingReason  String?                    @map("routing_reason") @db.Text
+  routingStatus  BotnextConversationStatus? @map("routing_status")
+  routingVersion String?                    @map("routing_version")
+  routedAt       DateTime?                  @map("routed_at")
+
+  conversation BotnextConversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  webhookEvent BotnextWebhookEvent? @relation(fields: [webhookEventId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([conversationId, externalMessageId])
+  @@index([conversationId, createdAt])
+  @@index([detectedIntent, classifiedAt])
+  @@index([routingAction, routedAt])
+  @@map("botnext_conversation_messages")
+}
