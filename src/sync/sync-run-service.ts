@@ -19,16 +19,34 @@ interface ConcluirSyncRunParams {
 interface FalharSyncRunParams {
   syncRunId: string;
   processedRecords: number;
+  totalRecords?: number;
+  changedRecords?: number;
+  unchangedRecords?: number;
   error: unknown;
 }
 
 function obterMensagemDoErro(error: unknown): string {
-  const mensagem =
+  const mensagemOriginal =
     error instanceof Error
       ? error.message
       : "Erro desconhecido";
 
-  return mensagem.slice(0, 4000);
+  const mensagemSegura = mensagemOriginal
+    .replace(
+      /\b(payload|request body|response body|body|details)\s*[:=]\s*(\{.*|\[.*)/gi,
+      "$1: [REDACTED]",
+    )
+    .replace(
+      /\b(api[-_ ]?key|authorization|token|password|senha|secret|credential|credencial)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[REDACTED]",
+    )
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /(https?:\/\/[^:\s/]+:)[^@\s/]+@/gi,
+      "$1[REDACTED]@",
+    );
+
+  return mensagemSegura.slice(0, 4000);
 }
 
 export async function iniciarSyncRun(
@@ -98,6 +116,15 @@ export async function falharSyncRun(
       status: "FAILED",
       finishedAt: new Date(),
       processedRecords: params.processedRecords,
+      ...(params.totalRecords === undefined
+        ? {}
+        : { totalRecords: params.totalRecords }),
+      ...(params.changedRecords === undefined
+        ? {}
+        : { changedRecords: params.changedRecords }),
+      ...(params.unchangedRecords === undefined
+        ? {}
+        : { unchangedRecords: params.unchangedRecords }),
       errorCount: {
         increment: 1,
       },
