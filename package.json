@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "node dist/server.js",
     "scheduler": "tsx src/scheduler.ts",
     "worker:botnext": "tsx src/workers/botnext-webhook-worker.ts",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
-    "prisma": "^6.12.0"
+    "prisma": "^6.12.0",
+    "vitest": "^5.0.0"
   }
 }
