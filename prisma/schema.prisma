@@ -20,17 +20,20 @@ model Tenant {
   arbrainDataId Int     @map("arbrain_data_id")
   active        Boolean @default(true)
 
-  clientes             Cliente[]
-  produtos             Produto[]
-  cervejas             Cerveja[]
-  pagamentos           Pagamento[]
-  syncRuns             SyncRun[]
-  syncCursors          SyncCursor[]
-  bancos               Banco[]
-  empresas             Empresa[]
-  botnextWebhookEvents BotnextWebhookEvent[]
-  botnextAccounts      BotnextAccount[]
-  botnextConversations BotnextConversation[]
+  clientes              Cliente[]
+  produtos              Produto[]
+  cervejas              Cerveja[]
+  pagamentos            Pagamento[]
+  syncRuns              SyncRun[]
+  syncCursors           SyncCursor[]
+  bancos                Banco[]
+  empresas              Empresa[]
+  botnextWebhookEvents  BotnextWebhookEvent[]
+  botnextAccounts       BotnextAccount[]
+  botnextConversations  BotnextConversation[]
+  botnextPedidoExtracao BotnextPedidoExtracao[]
+  botnextPedidoRascunho BotnextPedidoRascunho[]
+  produtoAliases        ProdutoAlias[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -116,10 +119,12 @@ model Produto {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  aliases ProdutoAlias[]
 
   @@unique([tenantId, arbrainId])
   @@unique([tenantId, sku])
+  @@unique([tenantId, id])
   @@index([tenantId, nome])
   @@map("produtos")
 }
@@ -414,11 +419,16 @@ model BotnextConversation {
   cliente        Cliente?                     @relation(fields: [clienteId], references: [id], onDelete: SetNull)
   botnextAccount BotnextAccount               @relation(fields: [botnextAccountId], references: [id])
   messages       BotnextConversationMessage[]
+  pedidoExtracao BotnextPedidoExtracao[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([botnextAccountId, sessionId])
+  // Alvo da FK composta (tenant_id, conversation_id) de botnext_pedido_extracao
+  // e botnext_pedido_rascunho — garante que o pedido e a conversa são do mesmo
+  // tenant. Redundante quanto à unicidade (id já é PK), obrigatório como alvo de FK.
+  @@unique([tenantId, id])
   @@index([tenantId, status])
   @@index([tenantId, clienteId])
   @@index([tenantId, intent])
@@ -451,14 +461,185 @@ model BotnextConversationMessage {
   routingVersion String?                    @map("routing_version")
   routedAt       DateTime?                  @map("routed_at")
 
-  conversation BotnextConversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  webhookEvent BotnextWebhookEvent? @relation(fields: [webhookEventId], references: [id], onDelete: SetNull)
+  conversation   BotnextConversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  webhookEvent   BotnextWebhookEvent?   @relation(fields: [webhookEventId], references: [id], onDelete: SetNull)
+  pedidoExtracao BotnextPedidoExtracao?
 
   createdAt DateTime @default(now()) @map("created_at")
 
   @@unique([conversationId, externalMessageId])
+  // Alvo da FK composta (conversation_id, source_message_id) de
+  // botnext_pedido_extracao — garante que a mensagem de origem pertence à
+  // mesma conversa da extração. Obrigatório como alvo de FK.
+  @@unique([conversationId, id])
   @@index([conversationId, createdAt])
   @@index([detectedIntent, classifiedAt])
   @@index([routingAction, routedAt])
   @@map("botnext_conversation_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Pedidos: extração (saída bruta do extractor) x rascunho (pedido normalizado
+// e resolvido, pronto para revisão/despacho). Entidades separadas de propósito:
+//
+//  - A extração é a leitura imutável de UMA mensagem do cliente. O extractor
+//    recebe somente a mensagem atual (não o histórico da conversa); portanto
+//    há no máximo uma extração por mensagem (unique em source_message_id) e
+//    source_hash é o hash do texto imutável dessa mensagem.
+//  - O rascunho deriva de uma extração e evolui por uma máquina de estados
+//    até o despacho para o n8n.
+//
+// Consistência multi-tenant é garantida pelo PostgreSQL via FKs compostas,
+// não pela aplicação (ver comentários @@unique nos modelos-alvo).
+// ---------------------------------------------------------------------------
+
+enum BotnextPedidoExtracaoStatus {
+  PENDENTE
+  PROCESSANDO
+  EXTRAIDO
+  FALHOU
+}
+
+enum BotnextPedidoRascunhoStatus {
+  RASCUNHO
+  PRONTO
+  CONFIRMADO
+  DESPACHADO
+  CANCELADO
+  FALHOU
+}
+
+model BotnextPedidoExtracao {
+  id              String @id @default(uuid()) @db.Uuid
+  tenantId        String @map("tenant_id") @db.Uuid
+  conversationId  String @map("conversation_id") @db.Uuid
+  sourceMessageId String @map("source_message_id") @db.Uuid
+
+  status BotnextPedidoExtracaoStatus @default(PENDENTE)
+
+  // Entrada imutável: sourceHash é o hash (ex.: sha256) do texto da mensagem
+  // atual usado como entrada do extractor. inputText guarda opcionalmente a
+  // string exata enviada ao modelo (auditoria/depuração).
+  sourceHash String  @map("source_hash")
+  inputText  String? @map("input_text") @db.Text
+
+  // Resultado da extração (preenchido pelo extractor em etapa futura)
+  itensExtraidos   Json?     @map("itens_extraidos")
+  observacoes      String?   @map("observacoes") @db.Text
+  extractorModel   String?   @map("extractor_model")
+  extractorVersion String?   @map("extractor_version")
+  promptVersion    String?   @map("prompt_version")
+  confianca        Float?    @map("confianca")
+  extractedAt      DateTime? @map("extracted_at")
+
+  // CAS / concorrência: revision para optimistic locking; lease para
+  // processamento exclusivo por worker.
+  revision             Int       @default(0)
+  processingToken      String?   @map("processing_token") @db.Uuid
+  processingWorker     String?   @map("processing_worker")
+  processingLeaseUntil DateTime? @map("processing_lease_until")
+  processingAttempts   Int       @default(0) @map("processing_attempts")
+
+  errorMessage String? @map("error_message") @db.Text
+
+  // tenant: existência do tenant. conversation: FK composta garante que a
+  // conversa é do mesmo tenant. sourceMessage: FK composta garante que a
+  // mensagem de origem é da mesma conversa (e, por transitividade, do tenant).
+  tenant        Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation  BotnextConversation        @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+  sourceMessage BotnextConversationMessage @relation(fields: [conversationId, sourceMessageId], references: [conversationId, id], onDelete: Cascade)
+  rascunho      BotnextPedidoRascunho?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Idempotência: no máximo uma extração por mensagem de origem. É também o
+  // alvo unique exigido pela relação 1:1 sourceMessage e, com conversation_id
+  // à esquerda, suporta o CASCADE da FK (tenant_id, conversation_id) e as
+  // consultas por conversa.
+  @@unique([conversationId, sourceMessageId])
+  // Alvo da FK composta (tenant_id, extracao_id) de botnext_pedido_rascunho.
+  // Redundante quanto à unicidade (id já é PK), obrigatório como alvo de FK.
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@index([status, processingLeaseUntil])
+  @@map("botnext_pedido_extracao")
+}
+
+model BotnextPedidoRascunho {
+  id         String @id @default(uuid()) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  extracaoId String @map("extracao_id") @db.Uuid
+
+  status BotnextPedidoRascunhoStatus @default(RASCUNHO)
+
+  // Conteúdo do rascunho — a resolução de catálogo será feita em etapa futura.
+  itens              Json?   @map("itens")
+  totalItens         Int     @default(0) @map("total_itens")
+  itensResolvidos    Int     @default(0) @map("itens_resolvidos")
+  itensNaoResolvidos Int     @default(0) @map("itens_nao_resolvidos")
+  observacoes        String? @map("observacoes") @db.Text
+
+  // CAS / concorrência
+  revision Int @default(0)
+
+  // Despacho para n8n — efeito externo, desativado nesta etapa. dispatchKey
+  // garante idempotência do envio; lease garante despacho exclusivo.
+  dispatchKey        String?   @map("dispatch_key")
+  dispatchToken      String?   @map("dispatch_token") @db.Uuid
+  dispatchWorker     String?   @map("dispatch_worker")
+  dispatchLeaseUntil DateTime? @map("dispatch_lease_until")
+  dispatchAttempts   Int       @default(0) @map("dispatch_attempts")
+  dispatchedAt       DateTime? @map("dispatched_at")
+
+  errorMessage String? @map("error_message") @db.Text
+
+  // tenant: existência do tenant. extracao: FK composta (tenant_id, extracao_id)
+  // garante que o rascunho e a extração são do mesmo tenant. A conversa/mensagem
+  // do rascunho são obtidas via extracao.
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  extracao BotnextPedidoExtracao @relation(fields: [tenantId, extracaoId], references: [tenantId, id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Idempotência: no máximo um rascunho por extração. É também o alvo unique
+  // exigido pela relação 1:1 extracao e suporta o CASCADE da FK
+  // (tenant_id, extracao_id) a partir de botnext_pedido_extracao.
+  @@unique([tenantId, extracaoId])
+  // Idempotência do envio ao n8n (dispatchKey nulo não conflita no Postgres).
+  @@unique([tenantId, dispatchKey])
+  @@index([tenantId, status])
+  @@index([status, dispatchLeaseUntil])
+  @@map("botnext_pedido_rascunho")
+}
+
+// Alias de produto: texto (normalizado) que resolve para exatamente um
+// produto dentro de um tenant. Todo ProdutoAlias representa, por definição,
+// uma resolução ALIAS_DIRETO — a origem da resolução não é modelada aqui,
+// pertence ao resultado da resolução do item (etapa futura). Não são criados
+// automaticamente e não há alias genérico. Único por (tenant + texto).
+model ProdutoAlias {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  produtoId String @map("produto_id") @db.Uuid
+
+  alias            String
+  aliasNormalizado String @map("alias_normalizado")
+
+  ativo Boolean @default(true)
+
+  // FK composta (tenant_id, produto_id) -> produtos(tenant_id, id) garante
+  // que o alias e o produto pertencem ao mesmo tenant.
+  produto Produto @relation(fields: [tenantId, produtoId], references: [tenantId, id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, aliasNormalizado])
+  // Suporta o CASCADE da FK composta (tenant_id, produto_id) e consultas
+  // "aliases do produto X".
+  @@index([tenantId, produtoId])
+  @@map("produto_aliases")
 }

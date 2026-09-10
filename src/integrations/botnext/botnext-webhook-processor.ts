@@ -32,6 +32,10 @@ import {
   rotearEventoBotnext,
 } from "./botnext-intent-routing-service.js";
 
+import {
+  processarFluxoPedidoBotnext,
+} from "./botnext-pedido-flow-service.js";
+
 export type ResultadoProcessamentoBotnext = {
   processado: boolean;
   obsoleto: boolean;
@@ -286,7 +290,31 @@ await rotearEventoBotnext({
       });
     }
 
-    // 4. O evento só é finalizado depois de:
+    // 4. Fluxo de pedido (Etapa 3.2): extração → rascunho → confirmação →
+    // cancelamento → dispatch ao webhook n8n → resposta ao cliente.
+    //
+    // Ponto ÚNICO de delegação: o processor não conhece a máquina de estados
+    // do pedido. Com a IA desligada, processarFluxoPedidoBotnext retorna
+    // SEM_PEDIDO sem tocar em nada externo. O fluxo nunca cria pedido na API
+    // do cliente — termina no webhook do n8n (PEDIDO_CONFIRMADO_V1).
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
+    }
+
+    if (
+      resultadoClassificacao.situacao !==
+      "DESATIVADA"
+    ) {
+      await processarFluxoPedidoBotnext({
+        tenantId:
+          evento.tenantId,
+
+        eventoId:
+          evento.id,
+      });
+    }
+
+    // 5. O evento só é finalizado depois de:
     //
     // - registrar a mensagem;
     // - classificar, quando a IA estiver ativa;
