@@ -6,9 +6,21 @@ import {
   Redis,
 } from "ioredis";
 
-import {
-  env,
-} from "../config/env.js";
+function obterRedisUrl(): string {
+  const valor = process.env.REDIS_URL?.trim();
+
+  if (!valor) {
+    throw new Error("REDIS_URL não configurada.");
+  }
+
+  const url = new URL(valor);
+
+  if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
+    throw new Error("REDIS_URL deve usar redis:// ou rediss://.");
+  }
+
+  return valor;
+}
 
 function obterBancoRedis(url: URL): number {
   const caminho = url.pathname.replace(/^\/+/, "");
@@ -28,7 +40,7 @@ function obterBancoRedis(url: URL): number {
 // A fila deve falhar rapidamente quando o Redis estiver indisponível.
 export function criarConexaoRedisProdutor(): Redis {
   return new Redis(
-    env.REDIS_URL,
+    obterRedisUrl(),
     {
       maxRetriesPerRequest: 1,
       enableOfflineQueue: false,
@@ -40,7 +52,7 @@ export function criarConexaoRedisProdutor(): Redis {
 // Assim, ele poderá recriá-la automaticamente após uma queda do Redis.
 export function criarConexaoRedisWorker():
   ConnectionOptions {
-  const url = new URL(env.REDIS_URL);
+  const url = new URL(obterRedisUrl());
 
   const porta = url.port
     ? Number(url.port)

@@ -16,6 +16,15 @@ import {
 } from "./integrations/botnext/botnext-webhook-processor.js";
 
 import {
+  BOTNEXT_PROCESSING_LEASE_MS,
+  BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+} from "./queue/botnext-processing-config.js";
+
+import {
+  reivindicarEventoBotnext,
+} from "./queue/botnext-processing-lease-service.js";
+
+import {
   normalizarTelefoneBrasil,
 } from "./visitas/telefone-service.js";
 
@@ -29,6 +38,23 @@ type ContatoTeste = {
   clienteId: string;
   telefoneE164: string;
 };
+
+async function processarEventoComLease(eventoId: string) {
+  const processingToken = randomUUID();
+  const claim = await reivindicarEventoBotnext({
+    eventoId,
+    processingToken,
+    processingWorker: "teste-conversa",
+    duracaoLeaseMs: BOTNEXT_PROCESSING_LEASE_MS,
+    maximoTentativas: BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+  });
+
+  if (claim.situacao === "NAO_ADQUIRIDO") {
+    return null;
+  }
+
+  return processarEventoBotnext(eventoId, processingToken);
+}
 
 function encontrarContatoExclusivo(
   clientes: ClienteTeste[],
@@ -284,11 +310,12 @@ async function executarTeste():
       );
 
     const primeiroResultado =
-      await processarEventoBotnext(
+      await processarEventoComLease(
         primeiroEventoId,
       );
 
     if (
+      !primeiroResultado ||
       primeiroResultado.status !==
         BotnextWebhookStatus.PROCESSED ||
       primeiroResultado.clienteId !==
@@ -317,11 +344,12 @@ async function executarTeste():
       );
 
     const segundoResultado =
-      await processarEventoBotnext(
+      await processarEventoComLease(
         segundoEventoId,
       );
 
     if (
+      !segundoResultado ||
       segundoResultado.status !==
         BotnextWebhookStatus.PROCESSED ||
       segundoResultado.conversaId !==
@@ -392,15 +420,12 @@ async function executarTeste():
     );
 
     const repeticao =
-      await processarEventoBotnext(
+      await processarEventoComLease(
         primeiroEventoId,
       );
 
     if (
-      repeticao.status !==
-        BotnextWebhookStatus.PROCESSED ||
-      repeticao.conversaId !==
-        conversa.id
+      repeticao !== null
     ) {
       throw new Error(
         "A repetição do processamento não foi reconhecida corretamente.",

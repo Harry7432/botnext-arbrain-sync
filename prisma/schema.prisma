@@ -329,6 +329,15 @@ model BotnextWebhookEvent {
   processedAt  DateTime?            @map("processed_at")
   errorMessage String?              @map("error_message") @db.Text
 
+  processingToken      String?   @map("processing_token") @db.Uuid
+  processingWorker     String?   @map("processing_worker")
+  processingLeaseUntil DateTime? @map("processing_lease_until")
+  processingAttempts   Int       @default(0) @map("processing_attempts")
+
+  enqueueToken      String?   @map("enqueue_token") @db.Uuid
+  enqueueLeaseUntil DateTime? @map("enqueue_lease_until")
+  enqueuedAt        DateTime? @map("enqueued_at")
+
   tenant              Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   cliente             Cliente?                    @relation(fields: [clienteId], references: [id], onDelete: SetNull)
   BotnextAccount      BotnextAccount?             @relation(fields: [botnextAccountId], references: [id])
@@ -339,6 +348,8 @@ model BotnextWebhookEvent {
 
   @@unique([tenantId, companyId, eventType, externalMessageId])
   @@index([tenantId, status])
+  @@index([status, processingLeaseUntil])
+  @@index([status, enqueueLeaseUntil])
   @@index([tenantId, sessionId])
   @@index([tenantId, clienteId])
   @@index([senderPhone])

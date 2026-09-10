@@ -1,8 +1,6 @@
-import "dotenv/config";
-
-import {
-  BotnextWebhookStatus,
-} from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import { pathToFileURL } from "node:url";
 
 import {
   type Job,
@@ -16,6 +14,24 @@ import {
 import {
   processarEventoBotnext,
 } from "../integrations/botnext/botnext-webhook-processor.js";
+
+import {
+  reivindicarEventoBotnext,
+} from "../queue/botnext-processing-lease-service.js";
+
+import {
+  BOTNEXT_PROCESSING_HEARTBEAT_MS,
+  BOTNEXT_PROCESSING_LEASE_MS,
+  BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+} from "../queue/botnext-processing-config.js";
+
+import {
+  criarGerenciadorHeartbeatBotnext,
+} from "../queue/botnext-processing-heartbeat.js";
+
+import {
+  recuperarProcessamentosBotnextAbandonados,
+} from "../queue/botnext-processing-recovery.js";
 
 import {
   type DadosJobBotnextWebhook,
@@ -51,36 +67,21 @@ let recuperacaoEmAndamento:
 let fechamentoEmAndamento:
   Promise<void> | null = null;
 
+let encerramentoEmAndamento:
+  Promise<void> | null = null;
+
 let encerrando = false;
 let reiniciando = false;
 let ultimoLogFalhaEm = 0;
+let sinaisRegistrados = false;
 
-async function prepararNovaTentativa(
-  eventoId: string,
-  tentativasRealizadas: number,
-): Promise<void> {
-  if (tentativasRealizadas === 0) {
-    return;
-  }
-
-  // FAILED indica uma tentativa que registrou falha.
-  //
-  // PROCESSING não é redefinido aqui: ele pode pertencer
-  // a uma execução ainda ativa.
-  await prisma.botnextWebhookEvent.updateMany({
-    where: {
-      id: eventoId,
-      status: BotnextWebhookStatus.FAILED,
-    },
-    data: {
-      status: BotnextWebhookStatus.RECEIVED,
-      processedAt: null,
-      errorMessage: null,
-    },
+const gerenciadorHeartbeat =
+  criarGerenciadorHeartbeatBotnext({
+    intervaloMs: BOTNEXT_PROCESSING_HEARTBEAT_MS,
+    duracaoLeaseMs: BOTNEXT_PROCESSING_LEASE_MS,
   });
-}
 
-async function executarJob(
+export async function executarJob(
   job: Job<DadosJobBotnextWebhook>,
 ): Promise<void> {
   if (job.name !== NOME_JOB_PROCESSAR_EVENTO) {
@@ -97,24 +98,42 @@ async function executarJob(
     );
   }
 
-  await prepararNovaTentativa(
+  const processingToken = randomUUID();
+  const claim = await reivindicarEventoBotnext({
     eventoId,
-    job.attemptsMade,
+    processingToken,
+    processingWorker: `${hostname()}:${process.pid}`,
+    duracaoLeaseMs: BOTNEXT_PROCESSING_LEASE_MS,
+    maximoTentativas: BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+  });
+
+  if (claim.situacao === "NAO_ADQUIRIDO") {
+    return;
+  }
+
+  const leaseAtiva = gerenciadorHeartbeat.acompanhar(
+    eventoId,
+    processingToken,
   );
 
-  const resultado = await processarEventoBotnext(
-    eventoId,
-  );
-
-  if (
-    resultado.status === BotnextWebhookStatus.RECEIVED ||
-    resultado.status === BotnextWebhookStatus.PROCESSING ||
-    resultado.status === BotnextWebhookStatus.FAILED
-  ) {
-    // Não considera um evento pendente como concluído.
-    throw new Error(
-      "Evento BotNext ainda não foi finalizado.",
+  try {
+    const resultado = await processarEventoBotnext(
+      eventoId,
+      processingToken,
+      () => leaseAtiva.possuiPosse,
     );
+
+    if (resultado.obsoleto) {
+      return;
+    }
+
+    if (resultado.status === "RECEIVED") {
+      throw new Error(
+        "Evento BotNext aguardando nova tentativa.",
+      );
+    }
+  } finally {
+    gerenciadorHeartbeat.remover(processingToken);
   }
 }
 
@@ -194,10 +213,25 @@ function agendarReinicioWorker(): void {
   }, TEMPO_REINICIO_WORKER_MS);
 }
 
-async function recuperarERegistrarPendentes(): Promise<void> {
+export async function executarCicloRecuperacaoBotnext(): Promise<void> {
   try {
+    const processamentos =
+      await recuperarProcessamentosBotnextAbandonados();
+
     const resultado =
       await recuperarEventosBotnextPendentes();
+
+    if (processamentos.recebidos > 0) {
+      console.log(
+        `${processamentos.recebidos} processamento(s) BotNext abandonado(s) recuperado(s).`,
+      );
+    }
+
+    if (processamentos.falhados > 0) {
+      console.warn(
+        `${processamentos.falhados} processamento(s) BotNext atingiram o limite de tentativas.`,
+      );
+    }
 
     if (resultado.enfileirados > 0) {
       console.log(
@@ -226,9 +260,9 @@ async function executarRecuperacaoDePendentes(): Promise<void> {
     return recuperacaoEmAndamento;
   }
 
-  const recuperacao = recuperarERegistrarPendentes();
+  const recuperacao = executarCicloRecuperacaoBotnext();
 
- recuperacaoEmAndamento = recuperacao;
+  recuperacaoEmAndamento = recuperacao;
 
   try {
     await recuperacao;
@@ -323,7 +357,17 @@ function criarWorker(): Worker<DadosJobBotnextWebhook> {
   return worker;
 }
 
-function iniciarWorker(): void {
+function registrarSinais(): void {
+  if (sinaisRegistrados) {
+    return;
+  }
+
+  sinaisRegistrados = true;
+  process.once("SIGINT", solicitarEncerramento);
+  process.once("SIGTERM", solicitarEncerramento);
+}
+
+export function iniciarWorker(): void {
   if (
     encerrando ||
     workerBotnextWebhook
@@ -331,6 +375,7 @@ function iniciarWorker(): void {
     return;
   }
 
+  registrarSinais();
   workerBotnextWebhook = criarWorker();
 }
 
@@ -359,11 +404,7 @@ async function reiniciarWorker(): Promise<void> {
   }
 }
 
-async function encerrarWorker(): Promise<void> {
-  if (encerrando) {
-    return;
-  }
-
+async function realizarEncerramento(): Promise<void> {
   encerrando = true;
 
   cancelarReinicioAgendado();
@@ -374,6 +415,7 @@ async function encerrarWorker(): Promise<void> {
   );
 
   await fecharInstanciaAtual();
+  await gerenciadorHeartbeat.encerrar();
 
   // Aguarda a recuperação que já estava em execução
   // antes de fechar a fila produtora.
@@ -391,6 +433,14 @@ async function encerrarWorker(): Promise<void> {
   );
 }
 
+export function encerrarWorker(): Promise<void> {
+  if (!encerramentoEmAndamento) {
+    encerramentoEmAndamento = realizarEncerramento();
+  }
+
+  return encerramentoEmAndamento;
+}
+
 function solicitarEncerramento(): void {
   void encerrarWorker().catch(() => {
     console.error(
@@ -401,19 +451,18 @@ function solicitarEncerramento(): void {
   });
 }
 
-process.once(
-  "SIGINT",
-  solicitarEncerramento,
-);
+const caminhoExecutado = process.argv[1];
+const arquivoExecutadoDiretamente =
+  caminhoExecutado !== undefined &&
+  import.meta.url === pathToFileURL(caminhoExecutado).href;
 
-process.once(
-  "SIGTERM",
-  solicitarEncerramento,
-);
+if (arquivoExecutadoDiretamente) {
+  await import("dotenv/config");
 
-try {
-  iniciarWorker();
-} catch {
-  registrarFalhaDeConexao();
-  agendarReinicioWorker();
+  try {
+    iniciarWorker();
+  } catch {
+    registrarFalhaDeConexao();
+    agendarReinicioWorker();
+  }
 }

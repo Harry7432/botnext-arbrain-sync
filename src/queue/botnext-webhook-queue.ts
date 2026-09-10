@@ -10,6 +10,14 @@ import {
   criarConexaoRedisProdutor,
 } from "./redis-connection.js";
 
+import {
+  criarJobIdEventoBotnext,
+} from "./botnext-webhook-job-id.js";
+
+import {
+  BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+} from "./botnext-processing-config.js";
+
 export const NOME_FILA_BOTNEXT_WEBHOOK =
   "botnext-webhook-events";
 
@@ -75,7 +83,7 @@ function obterFilaBotnextWebhook():
 
         defaultJobOptions: {
           attempts:
-            5,
+            BOTNEXT_PROCESSING_MAX_ATTEMPTS,
 
           backoff: {
             type:
@@ -153,6 +161,7 @@ export async function verificarFilaBotnext():
 
 export async function enfileirarEventoBotnext(
   eventoId: string,
+  enqueueToken?: string,
 ): Promise<void> {
   const fila =
     obterFilaBotnextWebhook();
@@ -171,7 +180,7 @@ export async function enfileirarEventoBotnext(
     {
       // O mesmo evento não cria dois trabalhos na fila.
       jobId:
-        eventoId,
+        criarJobIdEventoBotnext(eventoId, enqueueToken),
     },
   );
 }

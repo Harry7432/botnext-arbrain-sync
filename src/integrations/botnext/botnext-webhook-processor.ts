@@ -7,6 +7,16 @@ import {
 } from "../../database/prisma.js";
 
 import {
+  finalizarEventoBotnextIgnorado,
+  finalizarEventoBotnextProcessado,
+  registrarFalhaEventoBotnextComPosse,
+} from "../../queue/botnext-processing-lease-service.js";
+
+import {
+  BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+} from "../../queue/botnext-processing-config.js";
+
+import {
   normalizarTelefoneBrasil,
 } from "../../visitas/telefone-service.js";
 
@@ -24,6 +34,7 @@ import {
 
 export type ResultadoProcessamentoBotnext = {
   processado: boolean;
+  obsoleto: boolean;
   status: BotnextWebhookStatus;
   clienteId: string | null;
   conversaId: string | null;
@@ -58,30 +69,25 @@ function clientePossuiTelefone(
 
 async function finalizarComoIgnorado(
   eventoId: string,
+  processingToken: string,
   motivo: string,
 ): Promise<ResultadoProcessamentoBotnext> {
-  await prisma.botnextWebhookEvent.update({
-    where: {
-      id: eventoId,
-    },
-    data: {
-      status:
-        BotnextWebhookStatus.IGNORED,
-
-      clienteId:
-        null,
-
-      processedAt:
-        new Date(),
-
-      errorMessage:
-        motivo,
-    },
+  const resultado = await finalizarEventoBotnextIgnorado({
+    eventoId,
+    processingToken,
+    motivo,
   });
+
+  if (resultado === "LEASE_LOST") {
+    return resultadoObsoleto();
+  }
 
   return {
     processado:
       true,
+
+    obsoleto:
+      false,
 
     status:
       BotnextWebhookStatus.IGNORED,
@@ -96,119 +102,24 @@ async function finalizarComoIgnorado(
   };
 }
 
-async function registrarFalha(
-  eventoId: string,
-  error: unknown,
-): Promise<void> {
-  const mensagem =
-    error instanceof Error
-      ? error.message.slice(0, 2_000)
-      : "Falha desconhecida no processamento.";
-
-  try {
-    await prisma.botnextWebhookEvent.updateMany({
-      where: {
-        id:
-          eventoId,
-
-        status:
-          BotnextWebhookStatus.PROCESSING,
-      },
-      data: {
-        status:
-          BotnextWebhookStatus.FAILED,
-
-        processedAt:
-          new Date(),
-
-        errorMessage:
-          mensagem,
-      },
-    });
-  } catch {
-    console.error(
-      "Não foi possível registrar a falha do evento BotNext.",
-    );
-  }
+function resultadoObsoleto(): ResultadoProcessamentoBotnext {
+  return {
+    processado: false,
+    obsoleto: true,
+    status: BotnextWebhookStatus.PROCESSING,
+    clienteId: null,
+    conversaId: null,
+    motivo: "LEASE_LOST",
+  };
 }
 
 export async function processarEventoBotnext(
   eventoId: string,
+  processingToken: string,
+  possuiPosse: () => boolean = () => true,
 ): Promise<ResultadoProcessamentoBotnext> {
-  // Apenas uma execução consegue reivindicar
-  // um evento que está como RECEIVED.
-  const reivindicacao =
-    await prisma.botnextWebhookEvent.updateMany({
-      where: {
-        id:
-          eventoId,
-
-        status:
-          BotnextWebhookStatus.RECEIVED,
-      },
-      data: {
-        status:
-          BotnextWebhookStatus.PROCESSING,
-
-        processedAt:
-          null,
-
-        errorMessage:
-          null,
-      },
-    });
-
-  if (reivindicacao.count !== 1) {
-    const eventoAtual =
-      await prisma.botnextWebhookEvent.findUnique({
-        where: {
-          id:
-            eventoId,
-        },
-        select: {
-          status:
-            true,
-
-          clienteId:
-            true,
-
-          errorMessage:
-            true,
-
-          conversationMessage: {
-            select: {
-              conversationId:
-                true,
-            },
-          },
-        },
-      });
-
-    if (!eventoAtual) {
-      throw new Error(
-        "Evento BotNext não encontrado.",
-      );
-    }
-
-    return {
-      processado:
-        false,
-
-      status:
-        eventoAtual.status,
-
-      clienteId:
-        eventoAtual.clienteId,
-
-      conversaId:
-        eventoAtual
-          .conversationMessage
-          ?.conversationId ??
-        null,
-
-      motivo:
-        eventoAtual.errorMessage,
-    };
+  if (!possuiPosse()) {
+    return resultadoObsoleto();
   }
 
   try {
@@ -244,6 +155,7 @@ export async function processarEventoBotnext(
     if (!telefoneRemetente) {
       return await finalizarComoIgnorado(
         evento.id,
+        processingToken,
         "TELEFONE_REMETENTE_INVALIDO",
       );
     }
@@ -295,6 +207,7 @@ export async function processarEventoBotnext(
     ) {
       return await finalizarComoIgnorado(
         evento.id,
+        processingToken,
         "CLIENTE_NAO_ENCONTRADO",
       );
     }
@@ -304,6 +217,7 @@ export async function processarEventoBotnext(
     ) {
       return await finalizarComoIgnorado(
         evento.id,
+        processingToken,
         "TELEFONE_ASSOCIADO_A_MULTIPLOS_CLIENTES",
       );
     }
@@ -315,6 +229,10 @@ export async function processarEventoBotnext(
       throw new Error(
         "Falha inesperada ao selecionar o cliente.",
       );
+    }
+
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
     }
 
     // 1. Registra a mensagem recebida na conversa.
@@ -332,6 +250,10 @@ export async function processarEventoBotnext(
     //
     // Uma classificação já persistida é
     // reaproveitada pelo serviço.
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
+    }
+
     const resultadoClassificacao =
       await classificarEventoBotnextSeHabilitado({
         tenantId:
@@ -351,7 +273,11 @@ export async function processarEventoBotnext(
       resultadoClassificacao.situacao !==
       "DESATIVADA"
     ) {
-      await rotearEventoBotnext({
+      if (!possuiPosse()) {
+        return resultadoObsoleto();
+      }
+
+await rotearEventoBotnext({
         tenantId:
           evento.tenantId,
 
@@ -365,42 +291,27 @@ export async function processarEventoBotnext(
     // - registrar a mensagem;
     // - classificar, quando a IA estiver ativa;
     // - rotear, quando houver classificação.
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
+    }
+
     const finalizacao =
-      await prisma.botnextWebhookEvent.updateMany({
-        where: {
-          id:
-            evento.id,
-
-          tenantId:
-            evento.tenantId,
-
-          status:
-            BotnextWebhookStatus.PROCESSING,
-        },
-        data: {
-          status:
-            BotnextWebhookStatus.PROCESSED,
-
-          clienteId:
-            clienteEncontrado.id,
-
-          processedAt:
-            new Date(),
-
-          errorMessage:
-            null,
-        },
+      await finalizarEventoBotnextProcessado({
+        eventoId: evento.id,
+        processingToken,
+        clienteId: clienteEncontrado.id,
       });
 
-    if (finalizacao.count !== 1) {
-      throw new Error(
-        "O evento mudou de estado antes da finalização.",
-      );
+    if (finalizacao === "LEASE_LOST") {
+      return resultadoObsoleto();
     }
 
     return {
       processado:
         true,
+
+      obsoleto:
+        false,
 
       status:
         BotnextWebhookStatus.PROCESSED,
@@ -415,10 +326,48 @@ export async function processarEventoBotnext(
         null,
     };
   } catch (error: unknown) {
-    await registrarFalha(
-      eventoId,
-      error,
-    );
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
+    }
+
+    let resultadoFalha:
+      | "RECEIVED"
+      | "FAILED"
+      | "LEASE_LOST";
+
+    try {
+      resultadoFalha =
+        await registrarFalhaEventoBotnextComPosse({
+          eventoId,
+          processingToken,
+          error,
+          maximoTentativas:
+            BOTNEXT_PROCESSING_MAX_ATTEMPTS,
+        });
+    } catch {
+      console.error(
+        "Não foi possível registrar a falha do evento BotNext; o erro original será preservado.",
+      );
+
+      throw error;
+    }
+
+    if (resultadoFalha === "LEASE_LOST") {
+      return resultadoObsoleto();
+    }
+
+    if (resultadoFalha === "FAILED") {
+      return {
+        processado: false,
+        obsoleto: false,
+        status: BotnextWebhookStatus.FAILED,
+        clienteId: null,
+        conversaId: null,
+        motivo: error instanceof Error
+          ? error.message.slice(0, 2_000)
+          : "Falha desconhecida no processamento.",
+      };
+    }
 
     throw error;
   }
