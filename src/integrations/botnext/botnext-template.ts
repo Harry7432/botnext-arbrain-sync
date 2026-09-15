@@ -1,4 +1,5 @@
 import { env } from "../../config/env.js";
+import { avaliarTelefoneNoEscopoBotnext } from "./botnext-test-scope.js";
 
 // Formato da mensagem conforme a documentação recebida.
 export type BotNextTemplatePayload = {
@@ -22,12 +23,20 @@ export function montarTemplateDeTeste(): BotNextTemplatePayload {
   }
 
   const parametros = env.BOTNEXT_TEMPLATE_PARAMETERS_JSON;
+  const escopo = avaliarTelefoneNoEscopoBotnext(env.BOTNEXT_TEST_TO, {
+    modoTeste: env.BOTNEXT_TEST_MODE,
+    telefoneTeste: env.BOTNEXT_TEST_TO,
+  });
+
+  if (!escopo.permitido || !escopo.telefoneNormalizado) {
+    throw new Error("Configuração de isolamento BotNext inválida.");
+  }
 
   return {
     from: env.BOTNEXT_FROM,
 
     // O destinatário é exclusivamente o número de teste.
-    to: env.BOTNEXT_TEST_TO,
+    to: escopo.telefoneNormalizado,
 
     body: {
       templateId: env.BOTNEXT_TEMPLATE_ID,

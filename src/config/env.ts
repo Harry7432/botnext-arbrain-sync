@@ -1,15 +1,24 @@
 import "dotenv/config";
 import { z } from "zod";
+import { normalizarTelefoneBrasil } from "../visitas/telefone-service.js";
 
 // Aceita números brasileiros com 55 + DDD + número.
 // Use somente dígitos, sem espaços, parênteses ou "+".
 const telefoneSchema = z
   .string()
   .trim()
-  .regex(
-    /^55\d{10,11}$/,
-    "Use 55 + DDD + numero, somente digitos.",
-  );
+  .transform((valor, ctx) => {
+    const normalizado = normalizarTelefoneBrasil(valor);
+    if (!normalizado) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Informe um telefone brasileiro válido.",
+      });
+      return z.NEVER;
+    }
+
+    return normalizado.numeroComCodigoPais;
+  });
 
 // Converte o JSON do .env em um objeto de parâmetros.
 const parametrosTemplateSchema = z

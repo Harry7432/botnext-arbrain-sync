@@ -8,7 +8,7 @@ import {
   prisma,
 } from "../../database/prisma.js";
 
-type SalvarEventoBotnextParams = {
+export type SalvarEventoBotnextParams = {
   eventType: string;
   externalMessageId: string;
   companyId: string;
@@ -28,6 +28,11 @@ export type ResultadoPersistenciaWebhook = {
   eventoId: string | null;
 };
 
+export type ContaBotnextAutorizada = {
+  id: string;
+  tenantId: string;
+};
+
 export class ContaBotnextNaoAutorizadaError
   extends Error {
   constructor() {
@@ -40,13 +45,13 @@ export class ContaBotnextNaoAutorizadaError
   }
 }
 
-export async function salvarEventoBotnext(
-  params: SalvarEventoBotnextParams,
-): Promise<ResultadoPersistenciaWebhook> {
+export async function obterContaBotnextAutorizada(
+  companyId: string,
+): Promise<ContaBotnextAutorizada> {
   const conta =
     await prisma.botnextAccount.findUnique({
       where: {
-        companyId: params.companyId,
+        companyId,
       },
       select: {
         id: true,
@@ -67,6 +72,14 @@ export async function salvarEventoBotnext(
   ) {
     throw new ContaBotnextNaoAutorizadaError();
   }
+
+  return { id: conta.id, tenantId: conta.tenantId };
+}
+
+export async function salvarEventoBotnext(
+  params: SalvarEventoBotnextParams,
+): Promise<ResultadoPersistenciaWebhook> {
+  const conta = await obterContaBotnextAutorizada(params.companyId);
 
   const eventoId = randomUUID();
 

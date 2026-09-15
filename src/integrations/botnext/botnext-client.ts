@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { env } from "../../config/env.js";
 import { montarTemplateDeTeste } from "./botnext-template.js";
+import { avaliarTelefoneNoEscopoBotnext } from "./botnext-test-scope.js";
 
 const TIMEOUT_MS = 30_000;
 
@@ -43,7 +44,12 @@ export async function enviarTemplateDeTeste(): Promise<BotNextRespostaEnvio> {
 
   const mensagem = montarTemplateDeTeste();
 
-  if (mensagem.to !== env.BOTNEXT_TEST_TO) {
+  const escopo = avaliarTelefoneNoEscopoBotnext(mensagem.to, {
+    modoTeste: env.BOTNEXT_TEST_MODE,
+    telefoneTeste: env.BOTNEXT_TEST_TO,
+  });
+
+  if (!escopo.permitido) {
     throw new Error(
       "Envio bloqueado: destinatario diferente do numero de teste.",
     );

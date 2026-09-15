@@ -23,12 +23,12 @@ import {
 
 import {
   ContaBotnextNaoAutorizadaError,
-  salvarEventoBotnext,
 } from "./integrations/botnext/botnext-webhook-inbox.js";
 
 import {
-  enfileirarEventoBotnext,
-} from "./queue/botnext-webhook-queue.js";
+  receberEventoWebhookBotnext,
+  respostaIngressoWebhookBotnext,
+} from "./integrations/botnext/botnext-webhook-ingress-service.js";
 
 const configuracao = z
   .object({
@@ -347,8 +347,8 @@ async function validarCorpo(
     return;
   }
 
-  const persistencia =
-    await salvarEventoBotnext({
+  const ingresso =
+    await receberEventoWebhookBotnext({
       eventType:
         resultado.data.eventType,
 
@@ -383,20 +383,17 @@ async function validarCorpo(
         payload as Prisma.InputJsonValue,
     });
 
-  if (
-    !persistencia.eventoId
-  ) {
-    throw new Error(
-      "Evento persistido sem identificador.",
+  if (ingresso.situacao === "IGNORADO_FORA_DO_ESCOPO") {
+    console.warn(
+      "Evento BotNext ignorado pelo isolamento do modo de teste.",
     );
+    const respostaIngresso = respostaIngressoWebhookBotnext(ingresso);
+    responder(response, respostaIngresso.status, respostaIngresso.corpo);
+    return;
   }
 
-  await enfileirarEventoBotnext(
-    persistencia.eventoId,
-  );
-
   if (
-    persistencia.duplicado
+    ingresso.duplicado
   ) {
     console.log(
       "Evento repetido reconhecido e reenfileirado com segurança.",
@@ -415,21 +412,8 @@ async function validarCorpo(
     "Nenhuma IA, resposta automática ou escrita no ArBrain foi executada.",
   );
 
-  responder(
-    response,
-    200,
-    {
-      recebido: true,
-
-      persistido:
-        persistencia.persistido,
-
-      duplicado:
-        persistencia.duplicado,
-
-      enfileirado: true,
-    },
-  );
+  const respostaIngresso = respostaIngressoWebhookBotnext(ingresso);
+  responder(response, respostaIngresso.status, respostaIngresso.corpo);
 }
 
 const server =

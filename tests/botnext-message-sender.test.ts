@@ -51,6 +51,7 @@ function linhaRascunho(over: { itens?: Record<string, unknown>; revision?: numbe
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  vi.stubEnv("BOTNEXT_TEST_MODE", "false");
   mocks.rascunhoFindFirst.mockResolvedValue(linhaRascunho());
   mocks.rascunhoUpdateMany.mockResolvedValue({ count: 1 });
   mocks.clienteFindFirst.mockResolvedValue({ celular: "+55 11 99999-0000", telefone: null });
@@ -152,6 +153,61 @@ describe("criarServicoEnvioResposta", () => {
     expect(r).toEqual({ situacao: "SEM_ROTA", motivo: "SEM_TELEFONE" });
   });
 
+  it("modo de teste bloqueia outro destinatário antes do transporte", async () => {
+    vi.stubEnv("BOTNEXT_SEND_ENABLED", "true");
+    vi.stubEnv("BOTNEXT_FROM", "5511977770000");
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "5511988880001");
+    mocks.clienteFindFirst.mockResolvedValue({
+      celular: "5511988880002",
+      telefone: null,
+    });
+    const enviarTexto = vi.fn();
+    const servico = criarServicoEnvioResposta({ enviarTexto });
+
+    const r = await servico({
+      tenantId: TENANT,
+      rascunhoId: RASCUNHO_ID,
+      eventoId: EVENTO_ID,
+      texto: "Resumo",
+    });
+
+    expect(r).toEqual({
+      situacao: "SEM_ROTA",
+      motivo: "FORA_DO_ESCOPO_DE_TESTE",
+    });
+    expect(enviarTexto).not.toHaveBeenCalled();
+    expect(mocks.rascunhoUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("modo de teste permite o destinatário autorizado com outra formatação", async () => {
+    vi.stubEnv("BOTNEXT_SEND_ENABLED", "true");
+    vi.stubEnv("BOTNEXT_FROM", "5511977770000");
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "+55 (11) 98888-0001");
+    mocks.clienteFindFirst.mockResolvedValue({
+      celular: "(11) 98888-0001",
+      telefone: null,
+    });
+    const enviarTexto = vi.fn().mockResolvedValue({
+      tipo: "RESPOSTA",
+      status: 200,
+    });
+    const servico = criarServicoEnvioResposta({ enviarTexto });
+
+    const r = await servico({
+      tenantId: TENANT,
+      rascunhoId: RASCUNHO_ID,
+      eventoId: EVENTO_ID,
+      texto: "Resumo",
+    });
+
+    expect(r).toEqual({ situacao: "ENVIADA" });
+    expect(enviarTexto).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "5511988880001" }),
+    );
+  });
+
   it("2xx → ENVIADA, persiste marcador com eventoId e texto", async () => {
     vi.stubEnv("BOTNEXT_SEND_ENABLED", "true");
     vi.stubEnv("BOTNEXT_FROM", "5511999999999");
@@ -239,6 +295,22 @@ describe("criarServicoEnvioResposta", () => {
 });
 
 describe("enviarTextoBotNextComFetch — transporte", () => {
+  it("bloqueia outro destinatário antes do fetch", async () => {
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "5511988880001");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const r = await enviarTextoBotNextComFetch({
+      from: "5511977770000",
+      to: "5511988880002",
+      body: { text: "oi" },
+      options: { forceStartSession: false },
+    });
+
+    expect(r).toEqual({ tipo: "BLOQUEADO_TESTE" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("sem BOTNEXT_BASE_URL/token → FALHA_REDE, sem lançar", async () => {
     vi.stubEnv("BOTNEXT_BASE_URL", " ");
     vi.stubEnv("BOTNEXT_API_TOKEN", "");

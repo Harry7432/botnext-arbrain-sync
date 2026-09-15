@@ -22,8 +22,10 @@ import {
 import {
   lerConteudoPersistido,
 } from "./botnext-pedido-rascunho-persistence.js";
-import { normalizarTelefoneBrasil } from "../../visitas/telefone-service.js";
 import { prisma } from "../../database/prisma.js";
+import {
+  avaliarTelefoneNoEscopoBotnext,
+} from "./botnext-test-scope.js";
 
 const TIMEOUT_MS = 30_000;
 
@@ -41,6 +43,7 @@ export type MensagemTextoBotNext = {
 export type ResultadoEnvioTextoBotNext =
   | { tipo: "RESPOSTA"; status: number }
   | { tipo: "TEMPO_ESGOTADO" }
+  | { tipo: "BLOQUEADO_TESTE" }
   | { tipo: "FALHA_REDE"; motivo: string };
 
 export type EnviarTextoBotNext = (
@@ -55,6 +58,10 @@ export type EnviarTextoBotNext = (
 export async function enviarTextoBotNextComFetch(
   mensagem: MensagemTextoBotNext,
 ): Promise<ResultadoEnvioTextoBotNext> {
+  if (!avaliarTelefoneNoEscopoBotnext(mensagem.to).permitido) {
+    return { tipo: "BLOQUEADO_TESTE" };
+  }
+
   const baseUrl = process.env.BOTNEXT_BASE_URL?.trim().replace(/\/+$/, "");
   const token = process.env.BOTNEXT_API_TOKEN?.trim();
 
@@ -132,7 +139,12 @@ export type ResultadoEnvioResposta =
   | { situacao: "DESATIVADO" }
   | {
       situacao: "SEM_ROTA";
-      motivo: "SEM_FROM" | "SEM_CLIENTE" | "SEM_TELEFONE" | "SEM_RASCUNHO";
+      motivo:
+        | "SEM_FROM"
+        | "SEM_CLIENTE"
+        | "SEM_TELEFONE"
+        | "SEM_RASCUNHO"
+        | "FORA_DO_ESCOPO_DE_TESTE";
     }
   | { situacao: "ENVIADA" }
   | { situacao: "JA_ENVIADA" }
@@ -291,18 +303,26 @@ export function criarServicoEnvioResposta(
       select: { celular: true, telefone: true },
     });
 
-    const numero = normalizarTelefoneBrasil(
-      cliente?.celular ?? cliente?.telefone ?? null,
-    );
+    const telefoneCliente = cliente?.celular ?? cliente?.telefone ?? null;
+    const escopo = avaliarTelefoneNoEscopoBotnext(telefoneCliente);
 
-    if (!numero) {
+    if (!escopo.permitido) {
+      return {
+        situacao: "SEM_ROTA",
+        motivo: "FORA_DO_ESCOPO_DE_TESTE",
+      };
+    }
+
+    const numeroComCodigoPais = escopo.telefoneNormalizado;
+
+    if (!numeroComCodigoPais) {
       return { situacao: "SEM_ROTA", motivo: "SEM_TELEFONE" };
     }
 
     // 4) POST no BotNext.
     const resultado = await enviarTexto({
       from,
-      to: numero.numeroComCodigoPais,
+      to: numeroComCodigoPais,
       body: { text: texto },
       options: { forceStartSession: false },
     });
@@ -310,6 +330,13 @@ export function criarServicoEnvioResposta(
     // 5) Tratamento com dedup: só persiste o marcador quando o envio
     //    certamente aconteceu ou é indeterminado (timeout).
     switch (resultado.tipo) {
+      case "BLOQUEADO_TESTE": {
+        return {
+          situacao: "SEM_ROTA",
+          motivo: "FORA_DO_ESCOPO_DE_TESTE",
+        };
+      }
+
       case "RESPOSTA": {
         if (ehResposta2xx(resultado.status)) {
           await persistirMarcadorDeResposta({

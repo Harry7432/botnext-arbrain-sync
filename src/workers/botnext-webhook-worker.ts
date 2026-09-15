@@ -457,7 +457,10 @@ const arquivoExecutadoDiretamente =
   import.meta.url === pathToFileURL(caminhoExecutado).href;
 
 if (arquivoExecutadoDiretamente) {
-  await import("dotenv/config");
+  // Mesma validação central do server.ts: falha fechado (crash) antes de
+  // conectar ao Redis/iniciar o worker se BOTNEXT_TEST_MODE/BOTNEXT_TEST_TO
+  // (ou qualquer outra variável validada) estiver ausente ou inválida.
+  await import("../config/env.js");
 
   try {
     iniciarWorker();
