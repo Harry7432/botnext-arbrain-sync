@@ -28,6 +28,14 @@ export const FRASES_NEGATIVAS = [
   "nao quero mais",
 ] as const;
 
+const RESPOSTAS_CURTAS_NEUTRAS = new Set([
+  "ok",
+  "okay",
+  "beleza",
+  "ta bom",
+  "tudo bem",
+]);
+
 export type ClassificacaoConfirmacao =
   | "POSITIVA"
   | "NEGATIVA"
@@ -96,4 +104,20 @@ export function classificarConfirmacao(
   }
 
   return "IRRELEVANTE";
+}
+
+/**
+ * Identifica respostas que não devem ser entregues à IA como uma nova
+ * intenção quando o cliente está respondendo ao controle de um pedido.
+ */
+export function ehRespostaDeterministicaPedido(texto: string): boolean {
+  const normalizada = normalizarFraseConfirmacao(texto);
+  const classificacao = classificarConfirmacao(texto);
+
+  return (
+    FRASES_POSITIVAS.some((frase) => normalizada === frase) ||
+    FRASES_NEGATIVAS.some((frase) => normalizada === frase) ||
+    RESPOSTAS_CURTAS_NEUTRAS.has(normalizada) ||
+    (classificacao === "AMBIGUA" && normalizada.split(" ").length <= 4)
+  );
 }

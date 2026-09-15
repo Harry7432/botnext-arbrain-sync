@@ -123,7 +123,7 @@ export async function recuperarEventosBotnextPendentes(
         continue;
       }
 
-      await enfileirarEventoBotnext(
+      const resultadoEnfileiramento = await enfileirarEventoBotnext(
         evento.id,
         enqueueToken,
       );
@@ -138,7 +138,9 @@ export async function recuperarEventosBotnextPendentes(
         RETURNING "id"
       `;
 
-      enfileirados += 1;
+      if (resultadoEnfileiramento === "ENFILEIRADO") {
+        enfileirados += 1;
+      }
     } catch {
       falhas += 1;
 

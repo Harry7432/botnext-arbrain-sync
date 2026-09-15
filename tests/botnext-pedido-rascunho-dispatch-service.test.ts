@@ -30,6 +30,8 @@ const envOriginais = {
   url: process.env.BOTNEXT_PEDIDO_DISPATCH_URL,
   timeout: process.env.BOTNEXT_PEDIDO_DISPATCH_TIMEOUT_MS,
   attempts: process.env.BOTNEXT_PEDIDO_DISPATCH_MAX_ATTEMPTS,
+  testMode: process.env.BOTNEXT_TEST_MODE,
+  testTo: process.env.BOTNEXT_TEST_TO,
 };
 
 const mocks = vi.hoisted(() => ({
@@ -104,6 +106,9 @@ type LinhaDispatchSim = {
   errorMessage: string | null;
   extracao: {
     conversationId: string;
+    sourceMessage: {
+      webhookEvent: { senderPhone: string | null } | null;
+    };
     conversation: { clienteId: string | null };
   };
 };
@@ -130,6 +135,9 @@ function linhaConfirmada(
     errorMessage: null,
     extracao: {
       conversationId: CONVERSAO_ID,
+      sourceMessage: {
+        webhookEvent: { senderPhone: "5511988880001" },
+      },
       conversation: { clienteId: "cliente-1" },
     },
     ...overrides,
@@ -207,6 +215,7 @@ beforeEach(() => {
   process.env.BOTNEXT_PEDIDO_DISPATCH_URL = URL_N8N;
   process.env.BOTNEXT_PEDIDO_DISPATCH_TIMEOUT_MS = "1000";
   process.env.BOTNEXT_PEDIDO_DISPATCH_MAX_ATTEMPTS = "3";
+  process.env.BOTNEXT_TEST_MODE = "false";
 
   mocks.rascunhoFindFirst.mockImplementation(async () =>
     linha ? structuredClone(linha) : null,
@@ -214,7 +223,11 @@ beforeEach(() => {
   mocks.rascunhoUpdateMany.mockImplementation(async ({ where, data }) =>
     aplicarUpdateMany(where, data),
   );
-  mocks.clienteFindFirst.mockResolvedValue({ arbrainId: "arb-cliente-1" });
+  mocks.clienteFindFirst.mockResolvedValue({
+    arbrainId: "arb-cliente-1",
+    celular: "5511988880001",
+    telefone: null,
+  });
 });
 
 afterEach(() => {
@@ -237,6 +250,16 @@ afterEach(() => {
     delete process.env.BOTNEXT_PEDIDO_DISPATCH_MAX_ATTEMPTS;
   } else {
     process.env.BOTNEXT_PEDIDO_DISPATCH_MAX_ATTEMPTS = envOriginais.attempts;
+  }
+  if (envOriginais.testMode === undefined) {
+    delete process.env.BOTNEXT_TEST_MODE;
+  } else {
+    process.env.BOTNEXT_TEST_MODE = envOriginais.testMode;
+  }
+  if (envOriginais.testTo === undefined) {
+    delete process.env.BOTNEXT_TEST_TO;
+  } else {
+    process.env.BOTNEXT_TEST_TO = envOriginais.testTo;
   }
 });
 
@@ -342,6 +365,58 @@ describe("dispatch do pedido confirmado ao n8n (Etapa 3.1)", () => {
     expect(item.idUnidade).toBeNull();
     expect(item.tipoLinha).toBeNull();
     expect(item.valorUnitario).toBeNull();
+  });
+
+  it("modo de teste bloqueia cliente fora do escopo antes do lease e HTTP", async () => {
+    process.env.BOTNEXT_TEST_MODE = "true";
+    process.env.BOTNEXT_TEST_TO = "5511988880001";
+    linha = linhaConfirmada();
+    linha.extracao.sourceMessage.webhookEvent = {
+      senderPhone: "5511988880002",
+    };
+    const enviador = enviadorFixo({
+      tipo: "RESPOSTA",
+      status: 200,
+      corpo: null,
+    });
+
+    const r = await despachar(enviador);
+
+    expect(r).toEqual({
+      situacao: "FORA_DO_ESCOPO_DE_TESTE",
+      rascunhoId: RASCUNHO_ID,
+    });
+    expect(mocks.rascunhoUpdateMany).not.toHaveBeenCalled();
+    expect(mocks.clienteFindFirst).not.toHaveBeenCalled();
+    expect(postagens).toHaveLength(0);
+    expect(linha?.dispatchAttempts).toBe(0);
+  });
+
+  it("modo de teste bloqueia registro antigo DESPACHADO fora do escopo", async () => {
+    process.env.BOTNEXT_TEST_MODE = "true";
+    process.env.BOTNEXT_TEST_TO = "5511988880001";
+    linha = linhaConfirmada({
+      status: BotnextPedidoRascunhoStatus.DESPACHADO,
+      dispatchedAt: new Date("2026-09-10T10:00:00.000Z"),
+    });
+    linha.extracao.sourceMessage.webhookEvent = {
+      senderPhone: "5511988880002",
+    };
+    const enviador = enviadorFixo({
+      tipo: "RESPOSTA",
+      status: 200,
+      corpo: null,
+    });
+
+    const r = await despachar(enviador);
+
+    expect(r).toEqual({
+      situacao: "FORA_DO_ESCOPO_DE_TESTE",
+      rascunhoId: RASCUNHO_ID,
+    });
+    expect(mocks.clienteFindFirst).not.toHaveBeenCalled();
+    expect(mocks.rascunhoUpdateMany).not.toHaveBeenCalled();
+    expect(postagens).toHaveLength(0);
   });
 
   it("#5 4xx → FALHA_PERMANENTE, status FALHOU", async () => {

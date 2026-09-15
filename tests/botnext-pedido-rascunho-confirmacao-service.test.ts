@@ -80,7 +80,12 @@ type LinhaSim = {
   revision: number;
   itens: unknown;
   dispatchKey: string | null;
-  extracao: { conversationId: string };
+  extracao: {
+    conversationId: string;
+    sourceMessage: {
+      webhookEvent: { senderPhone: string | null } | null;
+    };
+  };
 };
 
 let linha: LinhaSim | null = null;
@@ -99,12 +104,19 @@ function definirLinha(
     revision,
     itens: conteudoRascunho,
     dispatchKey: conteudoRascunho.confirmacao?.dispatchKey ?? null,
-    extracao: { conversationId: CONVERSAO_ID },
+    extracao: {
+      conversationId: CONVERSAO_ID,
+      sourceMessage: {
+        webhookEvent: { senderPhone: "5511988880001" },
+      },
+    },
   };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  vi.stubEnv("BOTNEXT_TEST_MODE", "false");
   linha = null;
   protocoloUpdate = [];
 
@@ -160,6 +172,48 @@ function chaveEsperada(itens: ItemRascunho[], revision = 1): string {
 }
 
 describe("serviço de confirmação de pedido (Etapa 3.1)", () => {
+  it("modo de teste não confirma rascunho originado por outro telefone", async () => {
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "5511988880001");
+    definirLinha(
+      BotnextPedidoRascunhoStatus.PRONTO,
+      conteudo([itemRascunho()]),
+    );
+    linha!.extracao.sourceMessage.webhookEvent = {
+      senderPhone: "5511988880002",
+    };
+
+    const r = await confirmar();
+
+    expect(r).toMatchObject({
+      situacao: "NAO_CONFIRMAVEL",
+      motivo: "FORA_DO_ESCOPO_DE_TESTE",
+    });
+    expect(mocks.rascunhoUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("modo de teste não retorna sucesso idempotente para confirmado fora do escopo", async () => {
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "5511988880001");
+    definirLinha(
+      BotnextPedidoRascunhoStatus.CONFIRMADO,
+      conteudo([itemRascunho()]),
+      1,
+    );
+    linha!.extracao.sourceMessage.webhookEvent = {
+      senderPhone: "5511988880002",
+    };
+
+    const r = await confirmar();
+
+    expect(r).toMatchObject({
+      situacao: "NAO_CONFIRMAVEL",
+      motivo: "FORA_DO_ESCOPO_DE_TESTE",
+    });
+    expect(mocks.rascunhoUpdateMany).not.toHaveBeenCalled();
+  });
+
+
   it("#1 PRONTO + zero pendências → CONFIRMADO com dispatchKey/confirmadoEm/revision+1", async () => {
     const itens = [itemRascunho()];
     definirLinha(BotnextPedidoRascunhoStatus.PRONTO, conteudo(itens), 0);
@@ -269,7 +323,12 @@ describe("serviço de confirmação de pedido (Etapa 3.1)", () => {
         id: RASCUNHO_ID,
         tenantId: TENANT_A,
         extracaoId: EXTRACAO_ID,
-        extracao: { conversationId: CONVERSAO_ID },
+        extracao: {
+          conversationId: CONVERSAO_ID,
+          sourceMessage: {
+            webhookEvent: { senderPhone: "5511988880001" },
+          },
+        },
       }),
       status: BotnextPedidoRascunhoStatus.PRONTO,
       revision: 0,
@@ -324,7 +383,12 @@ describe("serviço de confirmação de pedido (Etapa 3.1)", () => {
       revision: 0,
       dispatchKey: null,
       itens: conteudo(itens),
-      extracao: { conversationId: CONVERSAO_ID },
+      extracao: {
+        conversationId: CONVERSAO_ID,
+        sourceMessage: {
+          webhookEvent: { senderPhone: "5511988880001" },
+        },
+      },
     };
     const revertido = JSON.parse(JSON.stringify(pronto)) as LinhaSim;
     revertido.status = BotnextPedidoRascunhoStatus.RASCUNHO;

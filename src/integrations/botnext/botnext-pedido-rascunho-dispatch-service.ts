@@ -30,6 +30,9 @@ import {
 import {
   montarPayloadPedidoConfirmadoV1,
 } from "../../pedidos/pedido-confirmado/payload-pedido-confirmado.js";
+import {
+  avaliarTelefoneNoEscopoBotnext,
+} from "./botnext-test-scope.js";
 
 // ---------------------------------------------------------------------------
 // Cliente HTTP injetável
@@ -142,6 +145,10 @@ export type ResultadoDispatchRascunho =
   | {
       situacao: "CONCORRENCIA";
       rascunhoId: string;
+    }
+  | {
+      situacao: "FORA_DO_ESCOPO_DE_TESTE";
+      rascunhoId: string;
     };
 
 export interface DespacharPedidoParams {
@@ -159,10 +166,12 @@ export interface DependenciasDispatchPedido {
   duracaoLeaseMs?: number;
 }
 
-async function obterClienteArbrainId(
+async function obterClienteParaDispatch(
   tenantId: string,
   clienteId: string | null,
-): Promise<string | null> {
+): Promise<{
+  arbrainId: string;
+} | null> {
   if (!clienteId) {
     return null;
   }
@@ -172,7 +181,7 @@ async function obterClienteArbrainId(
     select: { arbrainId: true },
   });
 
-  return cliente?.arbrainId ?? null;
+  return cliente;
 }
 
 function ehResposta2xx(status: number): boolean {
@@ -203,6 +212,14 @@ export function criarServicoDispatchPedido(
     const linha = await lerRascunhoParaDispatch({ tenantId, rascunhoId });
     if (!linha) {
       throw new Error("Rascunho não encontrado no tenant informado.");
+    }
+
+    const escopo = avaliarTelefoneNoEscopoBotnext(
+      linha.extracao.sourceMessage.webhookEvent?.senderPhone ?? null,
+    );
+
+    if (!escopo.permitido) {
+      return { situacao: "FORA_DO_ESCOPO_DE_TESTE", rascunhoId };
     }
 
     // 4) Exigir CONFIRMADO + dispatchKey.
@@ -238,6 +255,11 @@ export function criarServicoDispatchPedido(
       );
     }
 
+    const cliente = await obterClienteParaDispatch(
+      tenantId,
+      linha.extracao.conversation.clienteId,
+    );
+
     // 5) Claim exclusivo (lease/f por CAS).
     const worker =
       dependencias.dispatchWorker ?? "botnext-pedido-dispatch";
@@ -260,11 +282,6 @@ export function criarServicoDispatchPedido(
     const tentativa = linha.dispatchAttempts + 1;
 
     // 6) Payload determinístico.
-    const clienteArbrainId = await obterClienteArbrainId(
-      tenantId,
-      linha.extracao.conversation.clienteId,
-    );
-
     const payload = montarPayloadPedidoConfirmadoV1({
       tenantId,
       conversationId: linha.extracao.conversationId,
@@ -272,7 +289,7 @@ export function criarServicoDispatchPedido(
       rascunhoId: linha.id,
       revision: linha.revision,
       confirmacao: conteudo.confirmacao,
-      clienteArbrainId,
+      clienteArbrainId: cliente?.arbrainId ?? null,
       itens: conteudo.itens,
     });
 

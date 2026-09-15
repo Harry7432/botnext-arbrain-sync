@@ -91,7 +91,7 @@ describe("recovery RECEIVED com enqueue lease", () => {
     mocks.queryRaw.mockReset();
     mocks.enfileirar.mockReset();
     mocks.falharNoLimite.mockReset();
-    mocks.enfileirar.mockResolvedValue(undefined);
+    mocks.enfileirar.mockResolvedValue("ENFILEIRADO");
     mocks.falharNoLimite.mockResolvedValue("FAILED");
   });
 
@@ -148,7 +148,7 @@ describe("recovery RECEIVED com enqueue lease", () => {
     instalarFake(estado);
     mocks.enfileirar
       .mockRejectedValueOnce(new Error("Redis indisponível"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce("ENFILEIRADO");
     const { recuperarEventosBotnextPendentes } =
       await import("../src/queue/botnext-webhook-recovery.js");
 
@@ -180,5 +180,25 @@ describe("recovery RECEIVED com enqueue lease", () => {
 
     expect(resultado.falhadosPorLimite).toBe(1);
     expect(mocks.enfileirar).not.toHaveBeenCalled();
+  });
+
+  it("job canônico processável confirma enqueuedAt sem publicar duplicata", async () => {
+    const estado: EstadoEnqueue = {
+      elegivel: true,
+      reservado: false,
+      token: null,
+      enqueuedAt: false,
+      noLimite: false,
+    };
+    instalarFake(estado);
+    mocks.enfileirar.mockResolvedValue("JOB_CANONICO_PROCESSAVEL");
+    const { recuperarEventosBotnextPendentes } =
+      await import("../src/queue/botnext-webhook-recovery.js");
+
+    const resultado = await recuperarEventosBotnextPendentes();
+
+    expect(resultado.enfileirados).toBe(0);
+    expect(resultado.falhas).toBe(0);
+    expect(estado.enqueuedAt).toBe(true);
   });
 });

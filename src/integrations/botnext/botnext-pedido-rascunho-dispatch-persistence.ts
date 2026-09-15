@@ -25,6 +25,11 @@ export type LinhaDispatchSelecionada = {
   dispatchedAt: Date | null;
   extracao: {
     conversationId: string;
+    sourceMessage: {
+      webhookEvent: {
+        senderPhone: string | null;
+      } | null;
+    };
     conversation: {
       clienteId: string | null;
     };
@@ -59,6 +64,11 @@ export async function lerRascunhoParaDispatch(params: {
       extracao: {
         select: {
           conversationId: true,
+          sourceMessage: {
+            select: {
+              webhookEvent: { select: { senderPhone: true } },
+            },
+          },
           conversation: {
             select: { clienteId: true },
           },

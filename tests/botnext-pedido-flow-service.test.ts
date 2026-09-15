@@ -19,6 +19,7 @@ vi.mock("../src/database/prisma.js", () => ({
 import {
   criarServicoFluxoPedido,
   processarFluxoPedidoBotnext,
+  processarRespostaDeterministicaPedidoBotnext,
 } from "../src/integrations/botnext/botnext-pedido-flow-service.js";
 import {
   MENSAGEM_AGUARDANDO_CLAREZA,
@@ -169,6 +170,9 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
       conversaId: CONV,
       novoStatus: "WAITING_CONFIRMATION",
     });
+    expect(fakes.alterarEstado.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      fakes.enviar.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(fakes.despachar).not.toHaveBeenCalled();
     expect(r).toMatchObject({
       situacao: "RASCUNHO_CRIADO",
@@ -211,6 +215,9 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
       conversaId: CONV,
       novoStatus: "WAITING_CUSTOMER",
     });
+    expect(fakes.alterarEstado.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      fakes.enviar.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(r).toMatchObject({ situacao: "RASCUNHO_ATUALIZADO", status: "PENDENTE" });
   });
 
@@ -295,15 +302,18 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
       conversaId: CONV,
       novoStatus: "ACTIVE",
     });
+    expect(fakes.alterarEstado.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      fakes.enviar.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(r).toMatchObject({
       situacao: "CONFIRMADO",
       conversaStatus: "ACTIVE",
     });
   });
 
-  it("sim sem rascunho em conversa em fluxo → re-extração multi-turn (bypass quando não-FAZER_PEDIDO)", async () => {
+  it("sim sem rascunho em conversa em fluxo é bloqueado sem extração ou sender", async () => {
     mocks.messageFindFirst.mockResolvedValue(
-      mensagem({ text: "vai sim", detectedIntent: "DUVIDA", conversation: { status: "WAITING_CUSTOMER" } }),
+      mensagem({ text: "sim", detectedIntent: "DUVIDA", conversation: { status: "WAITING_CUSTOMER" } }),
     );
     mocks.rascunhoFindFirst.mockResolvedValue(null);
     const { fakes, deps } = construirDeps();
@@ -311,15 +321,15 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
 
     const r = await fluxo({ tenantId: TENANT, eventoId: EVENTO });
 
-    expect(fakes.extrair).toHaveBeenCalledWith({
-      tenantId: TENANT,
-      eventoId: EVENTO,
-      permitirSemIntencaoDePedido: true,
+    expect(fakes.extrair).not.toHaveBeenCalled();
+    expect(fakes.enviar).not.toHaveBeenCalled();
+    expect(r).toEqual({
+      situacao: "SEM_PEDIDO",
+      motivo: "RESPOSTA_DE_CONTROLE_FORA_DE_CONTEXTO",
     });
-    expect(r).toMatchObject({ situacao: "RASCUNHO_CRIADO" });
   });
 
-  it("sim com rascunho PENDENTE → não confirma, re-extrai e pergunta", async () => {
+  it("sim com rascunho PENDENTE é bloqueado sem confirmar, extrair ou enviar", async () => {
     mocks.messageFindFirst.mockResolvedValue(
       mensagem({ text: "sim", conversation: { status: "WAITING_CUSTOMER" } }),
     );
@@ -346,12 +356,64 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
     const r = await fluxo({ tenantId: TENANT, eventoId: EVENTO });
 
     expect(fakes.confirmar).not.toHaveBeenCalled();
-    expect(fakes.extrair).toHaveBeenCalledTimes(1);
-    expect(r).toMatchObject({ situacao: "RASCUNHO_CRIADO" });
+    expect(fakes.extrair).not.toHaveBeenCalled();
+    expect(fakes.enviar).not.toHaveBeenCalled();
+    expect(r).toEqual({
+      situacao: "SEM_PEDIDO",
+      motivo: "RESPOSTA_DE_CONTROLE_FORA_DE_CONTEXTO",
+    });
+  });
+
+  it("ok fora de WAITING_CONFIRMATION é bloqueado sem extração ou sender", async () => {
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({ text: "ok", detectedIntent: "DUVIDA" }),
+    );
+    const { fakes, deps } = construirDeps();
+    const fluxo = criarServicoFluxoPedido(deps);
+
+    const r = await fluxo({ tenantId: TENANT, eventoId: EVENTO });
+
+    expect(fakes.extrair).not.toHaveBeenCalled();
+    expect(fakes.enviar).not.toHaveBeenCalled();
+    expect(r).toMatchObject({
+      situacao: "SEM_PEDIDO",
+      motivo: "RESPOSTA_DE_CONTROLE_FORA_DE_CONTEXTO",
+    });
+  });
+
+  it("confirmação anterior à versão PRONTO é bloqueada sem efeitos externos", async () => {
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({
+        text: "sim",
+        createdAt: new Date("2026-03-01T09:58:00.000Z"),
+        conversation: { status: "WAITING_CONFIRMATION" },
+      }),
+    );
+    mocks.rascunhoFindFirst.mockResolvedValue(rascunho());
+    const { fakes, deps } = construirDeps();
+    const fluxo = criarServicoFluxoPedido(deps);
+
+    const r = await fluxo({ tenantId: TENANT, eventoId: EVENTO });
+
+    expect(fakes.confirmar).not.toHaveBeenCalled();
+    expect(fakes.extrair).not.toHaveBeenCalled();
+    expect(fakes.enviar).not.toHaveBeenCalled();
+    // Há rascunho PRONTO em andamento (contexto amplo válido); só a
+    // confirmação estrita (mensagem posterior) é que não se aplica aqui —
+    // por isso o motivo é NAO_RECONHECIDA, não FORA_DE_CONTEXTO.
+    expect(r).toMatchObject({
+      situacao: "SEM_PEDIDO",
+      motivo: "RESPOSTA_DE_CONTROLE_NAO_RECONHECIDA",
+    });
   });
 
   it("cancelamento → CANCELADO + 'Pedido cancelado.' + conversa CANCELLED, sem dispatch", async () => {
-    mocks.messageFindFirst.mockResolvedValue(mensagem({ text: "não quero" }));
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({
+        text: "não quero",
+        conversation: { status: "WAITING_CONFIRMATION" },
+      }),
+    );
     mocks.rascunhoFindFirst.mockResolvedValue(rascunho());
     const { fakes, deps } = construirDeps();
     const fluxo = criarServicoFluxoPedido(deps);
@@ -369,13 +431,48 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
       conversaId: CONV,
       novoStatus: "CANCELLED",
     });
+    expect(fakes.alterarEstado.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      fakes.enviar.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(fakes.despachar).not.toHaveBeenCalled();
     expect(fakes.extrair).not.toHaveBeenCalled();
     expect(r).toEqual({ situacao: "CANCELADO", rascunhoId: RASCUNHO_ID });
   });
 
+  it("cancelamento ANTES de PRONTO (rascunho ainda em RASCUNHO/WAITING_CUSTOMER) também cancela", async () => {
+    // Regressão: cancelamento/ambiguidade não podem exigir o mesmo contexto
+    // estrito da confirmação (PRONTO + WAITING_CONFIRMATION) — o cliente
+    // precisa poder desistir a qualquer momento enquanto o rascunho ainda
+    // está em construção.
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({
+        text: "não quero mais",
+        conversation: { status: "WAITING_CUSTOMER" },
+      }),
+    );
+    mocks.rascunhoFindFirst.mockResolvedValue(
+      rascunho({ status: "RASCUNHO" }),
+    );
+    const { fakes, deps } = construirDeps();
+    const fluxo = criarServicoFluxoPedido(deps);
+
+    const r = await fluxo({ tenantId: TENANT, eventoId: EVENTO });
+
+    expect(fakes.cancelar).toHaveBeenCalledWith({
+      tenantId: TENANT,
+      rascunhoId: RASCUNHO_ID,
+    });
+    expect(fakes.extrair).not.toHaveBeenCalled();
+    expect(r).toEqual({ situacao: "CANCELADO", rascunhoId: RASCUNHO_ID });
+  });
+
   it("cancelamento não-cancelável (corrida com outro worker) → SEM_PEDIDO / NAO_CANCELAVEL", async () => {
-    mocks.messageFindFirst.mockResolvedValue(mensagem({ text: "não quero" }));
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({
+        text: "não quero",
+        conversation: { status: "WAITING_CONFIRMATION" },
+      }),
+    );
     mocks.rascunhoFindFirst.mockResolvedValue(rascunho());
     const { fakes, deps } = construirDeps({
       servicoCancelamento: vi
@@ -392,7 +489,12 @@ describe("criarServicoFluxoPedido (Etapa 3.2)", () => {
   });
 
   it("ambiguidade → AMBIGUO + MENSAGEM_AGUARDANDO_CLAREZA, nada mais", async () => {
-    mocks.messageFindFirst.mockResolvedValue(mensagem({ text: "sim, não quero" }));
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({
+        text: "sim, não quero",
+        conversation: { status: "WAITING_CONFIRMATION" },
+      }),
+    );
     mocks.rascunhoFindFirst.mockResolvedValue(rascunho());
     const { fakes, deps } = construirDeps();
     const fluxo = criarServicoFluxoPedido(deps);
@@ -571,5 +673,26 @@ describe("processarFluxoPedidoBotnext — wiring de produção", () => {
 
     expect(r).toEqual({ situacao: "SEM_PEDIDO", motivo: "IA_DESATIVADA" });
     expect(mocks.messageFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("pré-handler consome resposta curta incompatível sem depender da IA", async () => {
+    vi.stubEnv("BOTNEXT_AI_ENABLED", "false");
+    mocks.messageFindFirst.mockResolvedValue(
+      mensagem({ text: "sim", detectedIntent: null }),
+    );
+    mocks.rascunhoFindFirst.mockResolvedValue(null);
+
+    const r = await processarRespostaDeterministicaPedidoBotnext({
+      tenantId: TENANT,
+      eventoId: EVENTO,
+    });
+
+    expect(r).toEqual({
+      situacao: "PROCESSADA",
+      resultado: {
+        situacao: "SEM_PEDIDO",
+        motivo: "RESPOSTA_DE_CONTROLE_FORA_DE_CONTEXTO",
+      },
+    });
   });
 });

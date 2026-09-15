@@ -24,6 +24,7 @@ import {
 import {
   itemEstaPendente,
 } from "../../pedidos/rascunho/tipos.js";
+import { avaliarTelefoneNoEscopoBotnext } from "./botnext-test-scope.js";
 
 export interface ConfirmarPedidoParams {
   tenantId: string;
@@ -82,7 +83,14 @@ export function criarServicoConfirmacaoRascunho(): ServicoConfirmacaoRascunho {
         itens: true,
         dispatchKey: true,
         extracao: {
-          select: { conversationId: true },
+          select: {
+            conversationId: true,
+            sourceMessage: {
+              select: {
+                webhookEvent: { select: { senderPhone: true } },
+              },
+            },
+          },
         },
       },
     });
@@ -91,6 +99,18 @@ export function criarServicoConfirmacaoRascunho(): ServicoConfirmacaoRascunho {
       throw new Error(
         "Rascunho não encontrado no tenant informado.",
       );
+    }
+
+    const escopo = avaliarTelefoneNoEscopoBotnext(
+      linha.extracao.sourceMessage.webhookEvent?.senderPhone ?? null,
+    );
+    if (!escopo.permitido) {
+      return {
+        situacao: "NAO_CONFIRMAVEL",
+        rascunhoId: linha.id,
+        status: linha.status,
+        motivo: "FORA_DO_ESCOPO_DE_TESTE",
+      };
     }
 
     if (linha.status === BotnextPedidoRascunhoStatus.DESPACHADO) {

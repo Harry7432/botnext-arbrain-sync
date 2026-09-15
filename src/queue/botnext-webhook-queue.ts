@@ -28,6 +28,18 @@ export type DadosJobBotnextWebhook = {
   eventoId: string;
 };
 
+export type ResultadoEnfileiramentoBotnext =
+  | "ENFILEIRADO"
+  | "JOB_CANONICO_PROCESSAVEL";
+
+const ESTADOS_JOB_PROCESSAVEL = new Set([
+  "waiting",
+  "active",
+  "delayed",
+  "prioritized",
+  "waiting-children",
+]);
+
 let filaBotnextWebhook:
   Queue<DadosJobBotnextWebhook> | null =
     null;
@@ -162,7 +174,7 @@ export async function verificarFilaBotnext():
 export async function enfileirarEventoBotnext(
   eventoId: string,
   enqueueToken?: string,
-): Promise<void> {
+): Promise<ResultadoEnfileiramentoBotnext> {
   const fila =
     obterFilaBotnextWebhook();
 
@@ -172,6 +184,22 @@ export async function enfileirarEventoBotnext(
     fila,
   );
 
+  let jobId = criarJobIdEventoBotnext(eventoId);
+
+  if (enqueueToken) {
+    const jobCanonico = await fila.getJob(jobId);
+
+    if (jobCanonico) {
+      const estado = await jobCanonico.getState();
+
+      if (ESTADOS_JOB_PROCESSAVEL.has(estado)) {
+        return "JOB_CANONICO_PROCESSAVEL";
+      }
+
+      jobId = criarJobIdEventoBotnext(eventoId, enqueueToken);
+    }
+  }
+
   await fila.add(
     NOME_JOB_PROCESSAR_EVENTO,
     {
@@ -179,10 +207,11 @@ export async function enfileirarEventoBotnext(
     },
     {
       // O mesmo evento não cria dois trabalhos na fila.
-      jobId:
-        criarJobIdEventoBotnext(eventoId, enqueueToken),
+      jobId,
     },
   );
+
+  return "ENFILEIRADO";
 }
 
 export async function fecharFilaBotnext():

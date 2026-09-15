@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   registrarMensagem: vi.fn(),
   classificar: vi.fn(),
   rotear: vi.fn(),
+  processarRespostaDeterministica: vi.fn(),
   processarFluxoPedido: vi.fn(),
 }));
 
@@ -43,11 +44,16 @@ vi.mock("../src/integrations/botnext/botnext-intent-routing-service.js", () => (
   rotearEventoBotnext: mocks.rotear,
 }));
 vi.mock("../src/integrations/botnext/botnext-pedido-flow-service.js", () => ({
+  processarRespostaDeterministicaPedidoBotnext:
+    mocks.processarRespostaDeterministica,
   processarFluxoPedidoBotnext: mocks.processarFluxoPedido,
 }));
 
 describe("processor BotNext com fencing", () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("BOTNEXT_TEST_MODE", "false");
+
     for (const mock of Object.values(mocks)) {
       mock.mockReset();
     }
@@ -68,6 +74,9 @@ describe("processor BotNext com fencing", () => {
       mensagemCriada: true,
     });
     mocks.classificar.mockResolvedValue({ situacao: "DESATIVADA" });
+    mocks.processarRespostaDeterministica.mockResolvedValue({
+      situacao: "NAO_APLICAVEL",
+    });
     mocks.rotear.mockResolvedValue({
       situacao: "ROTEADA",
       mensagemId: "mensagem-1",
@@ -164,6 +173,108 @@ describe("processor BotNext com fencing", () => {
 
     expect(resultado.obsoleto).toBe(true);
     expect(mocks.registrarFalha).not.toHaveBeenCalled();
+  });
+
+  it("resposta determinística é processada antes da IA e encerra o fluxo geral", async () => {
+    mocks.processarRespostaDeterministica.mockResolvedValue({
+      situacao: "PROCESSADA",
+      resultado: { situacao: "CANCELADO", rascunhoId: "rascunho-1" },
+    });
+    const { processarEventoBotnext } =
+      await import("../src/integrations/botnext/botnext-webhook-processor.js");
+
+    const resultado = await processarEventoBotnext("evento-1", "token-atual");
+
+    expect(mocks.processarRespostaDeterministica).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      eventoId: "evento-1",
+    });
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(mocks.rotear).not.toHaveBeenCalled();
+    expect(mocks.processarFluxoPedido).not.toHaveBeenCalled();
+    expect(resultado).toMatchObject({ status: "PROCESSED", obsoleto: false });
+  });
+
+  it("handoff encerra automação após o roteamento sem executar fluxo de pedido", async () => {
+    mocks.classificar.mockResolvedValue({ situacao: "CLASSIFICADA" });
+    mocks.rotear.mockResolvedValue({
+      situacao: "ROTEADA",
+      mensagemId: "mensagem-1",
+      conversaId: "conversa-1",
+      decisao: {
+        acao: "ENCAMINHAR_ATENDIMENTO_HUMANO",
+        statusSugerido: "HUMAN_HANDOFF",
+        motivo: "CLASSIFICACAO_EXIGE_ATENDIMENTO_HUMANO",
+      },
+      versao: "v1",
+      roteadaEm: new Date(),
+      statusAnterior: "ACTIVE",
+      statusAtual: "HUMAN_HANDOFF",
+      conversaAtualizada: true,
+    });
+    const { processarEventoBotnext } =
+      await import("../src/integrations/botnext/botnext-webhook-processor.js");
+
+    const resultado = await processarEventoBotnext("evento-1", "token-atual");
+
+    expect(mocks.rotear).toHaveBeenCalledOnce();
+    expect(mocks.processarFluxoPedido).not.toHaveBeenCalled();
+    expect(mocks.finalizarProcessado).toHaveBeenCalledOnce();
+    expect(resultado).toMatchObject({ status: "PROCESSED", obsoleto: false });
+  });
+
+  it("conversa já em handoff termina antes de IA, pré-handler e fluxo", async () => {
+    mocks.registrarMensagem.mockResolvedValue({
+      conversaId: "conversa-1",
+      status: "HUMAN_HANDOFF",
+      mensagemCriada: true,
+    });
+    const { processarEventoBotnext } =
+      await import("../src/integrations/botnext/botnext-webhook-processor.js");
+
+    const resultado = await processarEventoBotnext("evento-1", "token-atual");
+
+    expect(mocks.processarRespostaDeterministica).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(mocks.rotear).not.toHaveBeenCalled();
+    expect(mocks.processarFluxoPedido).not.toHaveBeenCalled();
+    expect(resultado).toMatchObject({
+      status: "PROCESSED",
+      motivo: "CONVERSA_EM_ATENDIMENTO_HUMANO",
+    });
+  });
+
+  it("evento antigo fora do escopo termina IGNORED sem IA ou fluxo de pedido", async () => {
+    vi.stubEnv("BOTNEXT_TEST_MODE", "true");
+    vi.stubEnv("BOTNEXT_TEST_TO", "5511988880001");
+    mocks.eventoFindUnique.mockResolvedValue({
+      id: "evento-1",
+      tenantId: "tenant-1",
+      senderPhone: "5511988880002",
+    });
+    const { processarEventoBotnext } =
+      await import("../src/integrations/botnext/botnext-webhook-processor.js");
+
+    const resultado = await processarEventoBotnext("evento-1", "token-atual");
+
+    expect(resultado).toMatchObject({
+      processado: true,
+      obsoleto: false,
+      status: "IGNORED",
+      motivo: "FORA_DO_ESCOPO_DE_TESTE",
+    });
+    expect(mocks.finalizarIgnorado).toHaveBeenCalledWith({
+      eventoId: "evento-1",
+      processingToken: "token-atual",
+      motivo: "FORA_DO_ESCOPO_DE_TESTE",
+    });
+    expect(mocks.clienteFindMany).not.toHaveBeenCalled();
+    expect(mocks.registrarMensagem).not.toHaveBeenCalled();
+    expect(mocks.processarRespostaDeterministica).not.toHaveBeenCalled();
+    expect(mocks.classificar).not.toHaveBeenCalled();
+    expect(mocks.rotear).not.toHaveBeenCalled();
+    expect(mocks.processarFluxoPedido).not.toHaveBeenCalled();
+    expect(mocks.finalizarProcessado).not.toHaveBeenCalled();
   });
 
   it("lease perdida impede registrar FAILED", async () => {

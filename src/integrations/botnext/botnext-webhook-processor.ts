@@ -34,7 +34,11 @@ import {
 
 import {
   processarFluxoPedidoBotnext,
+  processarRespostaDeterministicaPedidoBotnext,
 } from "./botnext-pedido-flow-service.js";
+import {
+  avaliarTelefoneNoEscopoBotnext,
+} from "./botnext-test-scope.js";
 
 export type ResultadoProcessamentoBotnext = {
   processado: boolean;
@@ -164,6 +168,18 @@ export async function processarEventoBotnext(
       );
     }
 
+    const escopo = avaliarTelefoneNoEscopoBotnext(
+      evento.senderPhone,
+    );
+
+    if (!escopo.permitido) {
+      return await finalizarComoIgnorado(
+        evento.id,
+        processingToken,
+        "FORA_DO_ESCOPO_DE_TESTE",
+      );
+    }
+
     const clientes =
       await prisma.cliente.findMany({
         where: {
@@ -249,7 +265,44 @@ export async function processarEventoBotnext(
           clienteEncontrado.id,
       });
 
-    // 2. Classifica a mensagem somente quando
+    if (registroConversa.status === "HUMAN_HANDOFF") {
+      if (!possuiPosse()) {
+        return resultadoObsoleto();
+      }
+
+      const finalizacao = await finalizarEventoBotnextProcessado({
+        eventoId: evento.id,
+        processingToken,
+        clienteId: clienteEncontrado.id,
+      });
+
+      if (finalizacao === "LEASE_LOST") {
+        return resultadoObsoleto();
+      }
+
+      return {
+        processado: true,
+        obsoleto: false,
+        status: BotnextWebhookStatus.PROCESSED,
+        clienteId: clienteEncontrado.id,
+        conversaId: registroConversa.conversaId,
+        motivo: "CONVERSA_EM_ATENDIMENTO_HUMANO",
+      };
+    }
+
+    // 2. Confirmações, cancelamentos e respostas curtas são tratados antes
+    // da IA para que nunca sejam reinterpretados como uma nova intenção.
+    if (!possuiPosse()) {
+      return resultadoObsoleto();
+    }
+
+    const respostaDeterministica =
+      await processarRespostaDeterministicaPedidoBotnext({
+        tenantId: evento.tenantId,
+        eventoId: evento.id,
+      });
+
+    // 3. Classifica a mensagem somente quando
     // BOTNEXT_AI_ENABLED estiver habilitado.
     //
     // Uma classificação já persistida é
@@ -259,38 +312,44 @@ export async function processarEventoBotnext(
     }
 
     const resultadoClassificacao =
-      await classificarEventoBotnextSeHabilitado({
-        tenantId:
-          evento.tenantId,
+      respostaDeterministica.situacao === "PROCESSADA"
+        ? null
+        : await classificarEventoBotnextSeHabilitado({
+            tenantId: evento.tenantId,
+            eventoId: evento.id,
+          });
 
-        eventoId:
-          evento.id,
-      });
-
-    // 3. O roteamento só é executado quando
+    // 4. O roteamento só é executado quando
     // a classificação estiver habilitada.
     //
     // O serviço de roteamento lê a classificação
     // persistida, grava a decisão e atualiza o
     // estado da conversa na mesma transação.
+    let encaminhadoParaAtendimentoHumano = false;
+
     if (
-      resultadoClassificacao.situacao !==
-      "DESATIVADA"
+      resultadoClassificacao !== null &&
+      resultadoClassificacao.situacao !== "DESATIVADA"
     ) {
       if (!possuiPosse()) {
         return resultadoObsoleto();
       }
 
-await rotearEventoBotnext({
+      const roteamento = await rotearEventoBotnext({
         tenantId:
           evento.tenantId,
 
         eventoId:
           evento.id,
       });
+
+      encaminhadoParaAtendimentoHumano =
+        roteamento.decisao.acao ===
+          "ENCAMINHAR_ATENDIMENTO_HUMANO" ||
+        roteamento.decisao.statusSugerido === "HUMAN_HANDOFF";
     }
 
-    // 4. Fluxo de pedido (Etapa 3.2): extração → rascunho → confirmação →
+    // 5. Fluxo de pedido (Etapa 3.2): extração → rascunho → confirmação →
     // cancelamento → dispatch ao webhook n8n → resposta ao cliente.
     //
     // Ponto ÚNICO de delegação: o processor não conhece a máquina de estados
@@ -302,8 +361,9 @@ await rotearEventoBotnext({
     }
 
     if (
-      resultadoClassificacao.situacao !==
-      "DESATIVADA"
+      resultadoClassificacao !== null &&
+      resultadoClassificacao.situacao !== "DESATIVADA" &&
+      !encaminhadoParaAtendimentoHumano
     ) {
       await processarFluxoPedidoBotnext({
         tenantId:
@@ -314,7 +374,7 @@ await rotearEventoBotnext({
       });
     }
 
-    // 5. O evento só é finalizado depois de:
+    // 6. O evento só é finalizado depois de:
     //
     // - registrar a mensagem;
     // - classificar, quando a IA estiver ativa;

@@ -63,7 +63,10 @@ import {
   type ResultadoAlteracaoEstado,
 } from "./botnext-conversation-state-service.js";
 import { iaBotnextHabilitada } from "./botnext-ai-service.js";
-import { classificarConfirmacao } from "./botnext-confirmacao-mensagem.js";
+import {
+  classificarConfirmacao,
+  ehRespostaDeterministicaPedido,
+} from "./botnext-confirmacao-mensagem.js";
 import {
   MENSAGEM_AGUARDANDO_CLAREZA,
   MENSAGEM_PEDIDO_CANCELADO,
@@ -102,6 +105,13 @@ export type ResultadoFluxoPedido =
 export type ServicoFluxoPedido = (
   params: ProcessarFluxoPedidoParams,
 ) => Promise<ResultadoFluxoPedido>;
+
+export type ResultadoRespostaDeterministicaPedido =
+  | { situacao: "NAO_APLICAVEL" }
+  | {
+      situacao: "PROCESSADA";
+      resultado: ResultadoFluxoPedido;
+    };
 
 export interface DependenciasFluxoPedido {
   /** Serviço real ou fake da extração (com lazy imports de OpenAI). */
@@ -290,15 +300,15 @@ export function criarServicoFluxoPedido(
       }
 
       // Não-ENVIADO → reconhece o pedido e mantém a conversa ativa.
+      await alterarEstado({
+        conversaId,
+        novoStatus: BotnextConversationStatus.ACTIVE,
+      });
       await enviarResposta({
         tenantId: params.tenantId,
         rascunhoId: rascunho.id,
         eventoId: params.eventoId,
         texto: MENSAGEM_RECEBENDO_PEDIDO,
-      });
-      await alterarEstado({
-        conversaId,
-        novoStatus: BotnextConversationStatus.ACTIVE,
       });
 
       return {
@@ -366,15 +376,15 @@ export function criarServicoFluxoPedido(
 
     if (construcao.status === BotnextPedidoRascunhoStatus.PRONTO) {
       const resumo = montarResumoPedido(conteudo.itens);
+      await alterarEstado({
+        conversaId,
+        novoStatus: BotnextConversationStatus.WAITING_CONFIRMATION,
+      });
       const enviada = await enviarResposta({
         tenantId: params.tenantId,
         rascunhoId: construcao.rascunhoId,
         eventoId: params.eventoId,
         texto: resumo,
-      });
-      await alterarEstado({
-        conversaId,
-        novoStatus: BotnextConversationStatus.WAITING_CONFIRMATION,
       });
       return {
         situacao: concretizado,
@@ -388,15 +398,15 @@ export function criarServicoFluxoPedido(
     const mensagemPendencia =
       perguntas ?? MENSAGEM_AGUARDANDO_CLAREZA;
 
+    await alterarEstado({
+      conversaId,
+      novoStatus: BotnextConversationStatus.WAITING_CUSTOMER,
+    });
     const enviada = await enviarResposta({
       tenantId: params.tenantId,
       rascunhoId: construcao.rascunhoId,
       eventoId: params.eventoId,
       texto: mensagemPendencia,
-    });
-    await alterarEstado({
-      conversaId,
-      novoStatus: BotnextConversationStatus.WAITING_CUSTOMER,
     });
 
     return {
@@ -446,6 +456,30 @@ export function criarServicoFluxoPedido(
     // 2) Último rascunho da conversa (recepção do fluxo atual).
     const rascunho = await buscarUltimoRascunho(conversaId);
 
+    const classificacaoConfirmacao = classificarConfirmacao(texto);
+    const dataMensagem = mensagem.eventDate ?? mensagem.createdAt;
+    // Contexto amplo: existe um rascunho ainda não-terminal (RASCUNHO ou
+    // PRONTO). Cancelamento/ambiguidade são válidos em qualquer ponto desse
+    // fluxo — só a CONFIRMAÇÃO exige o contexto estrito abaixo.
+    const rascunhoEmAndamento =
+      rascunho !== null && !statusRascunhoTerminal(rascunho.status);
+    // Contexto estrito: rascunho PRONTO aguardando confirmação explícita e
+    // mensagem posterior à última atualização do rascunho.
+    const contextoConfirmacaoValido =
+      rascunho?.status === BotnextPedidoRascunhoStatus.PRONTO &&
+      conversaStatus === BotnextConversationStatus.WAITING_CONFIRMATION &&
+      dataMensagem.getTime() > rascunho.atualizadoEm.getTime();
+
+    if (
+      ehRespostaDeterministicaPedido(texto) &&
+      !rascunhoEmAndamento
+    ) {
+      return {
+        situacao: "SEM_PEDIDO",
+        motivo: "RESPOSTA_DE_CONTROLE_FORA_DE_CONTEXTO",
+      };
+    }
+
     const emFluxoDePedido =
       rascunho !== null ||
       STATUS_CONVERSA_EM_FLUXO.has(conversaStatus);
@@ -470,10 +504,11 @@ export function criarServicoFluxoPedido(
     }
 
     // 5) Confirmação/cancelamento/ambiguidade quando há rascunho não-terminal.
-    if (rascunho !== null && !statusRascunhoTerminal(rascunho.status)) {
-      const classificacao = classificarConfirmacao(texto);
-
-      if (classificacao === "NEGATIVA") {
+    if (
+      rascunho !== null &&
+      !statusRascunhoTerminal(rascunho.status)
+    ) {
+      if (classificacaoConfirmacao === "NEGATIVA") {
         const cancelamento = await servicoCancelamento({
           tenantId,
           rascunhoId: rascunho.id,
@@ -483,15 +518,15 @@ export function criarServicoFluxoPedido(
           cancelamento.situacao === "CANCELADO" ||
           cancelamento.situacao === "JA_CANCELADO"
         ) {
+          await alterarEstado({
+            conversaId,
+            novoStatus: BotnextConversationStatus.CANCELLED,
+          });
           await enviarResposta({
             tenantId,
             rascunhoId: rascunho.id,
             eventoId,
             texto: MENSAGEM_PEDIDO_CANCELADO,
-          });
-          await alterarEstado({
-            conversaId,
-            novoStatus: BotnextConversationStatus.CANCELLED,
           });
           return { situacao: "CANCELADO", rascunhoId: rascunho.id };
         }
@@ -502,7 +537,7 @@ export function criarServicoFluxoPedido(
         };
       }
 
-      if (classificacao === "AMBIGUA") {
+      if (classificacaoConfirmacao === "AMBIGUA") {
         const enviada = await enviarResposta({
           tenantId,
           rascunhoId: rascunho.id,
@@ -514,19 +549,17 @@ export function criarServicoFluxoPedido(
 
       // Confirmação válida: rascunho PRONTO aguardando + mensagem posterior.
       if (
-        classificacao === "POSITIVA" &&
-        rascunho.status === BotnextPedidoRascunhoStatus.PRONTO &&
-        conversaStatus ===
-          BotnextConversationStatus.WAITING_CONFIRMATION
+        classificacaoConfirmacao === "POSITIVA" &&
+        contextoConfirmacaoValido
       ) {
-        const dataMensagem =
-          mensagem.eventDate ?? mensagem.createdAt;
-        const posterior =
-          dataMensagem.getTime() > rascunho.atualizadoEm.getTime();
+        return await confirmar(params, rascunho, conversaId);
+      }
 
-        if (posterior) {
-          return await confirmar(params, rascunho, conversaId);
-        }
+      if (ehRespostaDeterministicaPedido(texto)) {
+        return {
+          situacao: "SEM_PEDIDO",
+          motivo: "RESPOSTA_DE_CONTROLE_NAO_RECONHECIDA",
+        };
       }
     }
 
@@ -591,4 +624,49 @@ export async function processarFluxoPedidoBotnext(
   });
 
   return fluxo(params);
+}
+
+export async function processarRespostaDeterministicaPedidoBotnext(
+  params: ProcessarFluxoPedidoParams,
+): Promise<ResultadoRespostaDeterministicaPedido> {
+  const mensagem = await buscarMensagem(params);
+  const texto = mensagem?.text?.trim();
+
+  if (
+    mensagem?.role !== BotnextConversationMessageRole.CUSTOMER ||
+    !texto
+  ) {
+    return { situacao: "NAO_APLICAVEL" };
+  }
+
+  const rascunho = await buscarUltimoRascunho(mensagem.conversationId);
+  const dataMensagem = mensagem.eventDate ?? mensagem.createdAt;
+  const contextoConfirmacaoValido =
+    rascunho?.status === BotnextPedidoRascunhoStatus.PRONTO &&
+    mensagem.conversaStatus ===
+      BotnextConversationStatus.WAITING_CONFIRMATION &&
+    dataMensagem.getTime() > rascunho.atualizadoEm.getTime();
+  const classificacao = classificarConfirmacao(texto);
+
+  if (
+    !ehRespostaDeterministicaPedido(texto) &&
+    !(contextoConfirmacaoValido && classificacao !== "IRRELEVANTE")
+  ) {
+    return { situacao: "NAO_APLICAVEL" };
+  }
+
+  const extracaoNaoPermitida: ServicoExtracaoPedido = async () => {
+    throw new Error(
+      "Resposta determinística não pode iniciar extração de pedido.",
+    );
+  };
+  const fluxo = criarServicoFluxoPedido({
+    servicoExtracao: extracaoNaoPermitida,
+    catalogo: criarCatalogoRepositoryPrisma(prisma),
+  });
+
+  return {
+    situacao: "PROCESSADA",
+    resultado: await fluxo(params),
+  };
 }
