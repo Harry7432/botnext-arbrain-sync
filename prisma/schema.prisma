@@ -20,20 +20,22 @@ model Tenant {
   arbrainDataId Int     @map("arbrain_data_id")
   active        Boolean @default(true)
 
-  clientes              Cliente[]
-  produtos              Produto[]
-  cervejas              Cerveja[]
-  pagamentos            Pagamento[]
-  syncRuns              SyncRun[]
-  syncCursors           SyncCursor[]
-  bancos                Banco[]
-  empresas              Empresa[]
-  botnextWebhookEvents  BotnextWebhookEvent[]
-  botnextAccounts       BotnextAccount[]
-  botnextConversations  BotnextConversation[]
-  botnextPedidoExtracao BotnextPedidoExtracao[]
-  botnextPedidoRascunho BotnextPedidoRascunho[]
-  produtoAliases        ProdutoAlias[]
+  clientes                         Cliente[]
+  produtos                         Produto[]
+  cervejas                         Cerveja[]
+  pagamentos                       Pagamento[]
+  syncRuns                         SyncRun[]
+  syncCursors                      SyncCursor[]
+  bancos                           Banco[]
+  empresas                         Empresa[]
+  botnextWebhookEvents             BotnextWebhookEvent[]
+  botnextAccounts                  BotnextAccount[]
+  botnextConversations             BotnextConversation[]
+  botnextPedidoExtracao            BotnextPedidoExtracao[]
+  botnextPedidoRascunho            BotnextPedidoRascunho[]
+  botnextOutboundMessages          BotnextOutboundMessage[]
+  botnextPedidoConfirmadoSnapshots BotnextPedidoConfirmadoSnapshot[]
+  produtoAliases                   ProdutoAlias[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -92,12 +94,15 @@ model Cliente {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  botnextWebhookEvents BotnextWebhookEvent[]
-  botnextConversations BotnextConversation[]
+  tenant                           Tenant                            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  botnextWebhookEvents             BotnextWebhookEvent[]
+  botnextConversations             BotnextConversation[]
+  botnextOutboundMessages          BotnextOutboundMessage[]
+  botnextPedidoConfirmadoSnapshots BotnextPedidoConfirmadoSnapshot[]
 
   @@unique([tenantId, arbrainId])
   @@unique([tenantId, sku])
+  @@unique([tenantId, id])
   @@index([tenantId, clienteAtivo])
   @@index([tenantId, clienteBloqueado])
   @@index([tenantId, diaVisitaPrimario])
@@ -291,13 +296,16 @@ model BotnextAccount {
   channelPhone String? @map("channel_phone")
   active       Boolean @default(true)
 
-  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  webhookEvents BotnextWebhookEvent[]
-  conversations BotnextConversation[]
+  tenant                    Tenant                            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  webhookEvents             BotnextWebhookEvent[]
+  conversations             BotnextConversation[]
+  outboundMessages          BotnextOutboundMessage[]
+  pedidoConfirmadoSnapshots BotnextPedidoConfirmadoSnapshot[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  @@unique([tenantId, id])
   @@index([tenantId, active])
   @@map("botnext_accounts")
 }
@@ -343,15 +351,29 @@ model BotnextWebhookEvent {
   enqueueLeaseUntil DateTime? @map("enqueue_lease_until")
   enqueuedAt        DateTime? @map("enqueued_at")
 
-  tenant              Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  cliente             Cliente?                    @relation(fields: [clienteId], references: [id], onDelete: SetNull)
-  BotnextAccount      BotnextAccount?             @relation(fields: [botnextAccountId], references: [id])
-  conversationMessage BotnextConversationMessage?
+  // Identidade canônica é nullable para preservar eventos históricos. Novos
+  // eventos versionados serão vinculados pela aplicação antes da automação.
+  identityVersion          String? @map("identity_version")
+  senderPhoneNormalized    String? @map("sender_phone_normalized")
+  recipientPhoneNormalized String? @map("recipient_phone_normalized")
+
+  // Ordem durável de ingresso e geração do job BullMQ. A sequência será
+  // preenchida apenas para novos eventos; históricos permanecem sem backfill.
+  ingressSequence BigInt? @unique @default(dbgenerated("nextval('botnext_webhook_ingress_sequence_seq'::regclass)")) @map("ingress_sequence")
+  queueGeneration Int     @default(0) @map("queue_generation")
+
+  tenant                   Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente                  Cliente?                         @relation(fields: [clienteId], references: [id], onDelete: SetNull)
+  BotnextAccount           BotnextAccount?                  @relation(fields: [botnextAccountId], references: [id])
+  conversationMessage      BotnextConversationMessage?
+  outboundMessages         BotnextOutboundMessage[]
+  pedidoConfirmadoSnapshot BotnextPedidoConfirmadoSnapshot?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([tenantId, companyId, eventType, externalMessageId])
+  @@unique([tenantId, id])
   @@index([tenantId, status])
   @@index([status, processingLeaseUntil])
   @@index([status, enqueueLeaseUntil])
@@ -360,6 +382,7 @@ model BotnextWebhookEvent {
   @@index([senderPhone])
   @@index([createdAt])
   @@index([botnextAccountId])
+  @@index([botnextAccountId, sessionId, status, ingressSequence])
   @@map("botnext_webhook_events")
 }
 
@@ -407,6 +430,11 @@ model BotnextConversation {
   sessionId String                    @map("session_id")
   status    BotnextConversationStatus @default(ACTIVE)
 
+  // Nullable somente para compatibilidade com conversas históricas.
+  identityVersion          String? @map("identity_version")
+  senderPhoneNormalized    String? @map("sender_phone_normalized")
+  recipientPhoneNormalized String? @map("recipient_phone_normalized")
+
   intent               BotnextConversationIntent?
   intentConfidence     Float?                     @map("intent_confidence")
   intentUpdatedAt      DateTime?                  @map("intent_updated_at")
@@ -415,11 +443,13 @@ model BotnextConversation {
   lastMessageAt DateTime  @default(now()) @map("last_message_at")
   closedAt      DateTime? @map("closed_at")
 
-  tenant         Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  cliente        Cliente?                     @relation(fields: [clienteId], references: [id], onDelete: SetNull)
-  botnextAccount BotnextAccount               @relation(fields: [botnextAccountId], references: [id])
-  messages       BotnextConversationMessage[]
-  pedidoExtracao BotnextPedidoExtracao[]
+  tenant                    Tenant                            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cliente                   Cliente?                          @relation(fields: [clienteId], references: [id], onDelete: SetNull)
+  botnextAccount            BotnextAccount                    @relation(fields: [botnextAccountId], references: [id])
+  messages                  BotnextConversationMessage[]
+  pedidoExtracao            BotnextPedidoExtracao[]
+  outboundMessages          BotnextOutboundMessage[]
+  pedidoConfirmadoSnapshots BotnextPedidoConfirmadoSnapshot[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -545,10 +575,11 @@ model BotnextPedidoExtracao {
   // tenant: existência do tenant. conversation: FK composta garante que a
   // conversa é do mesmo tenant. sourceMessage: FK composta garante que a
   // mensagem de origem é da mesma conversa (e, por transitividade, do tenant).
-  tenant        Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversation  BotnextConversation        @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
-  sourceMessage BotnextConversationMessage @relation(fields: [conversationId, sourceMessageId], references: [conversationId, id], onDelete: Cascade)
-  rascunho      BotnextPedidoRascunho?
+  tenant                    Tenant                            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation              BotnextConversation               @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+  sourceMessage             BotnextConversationMessage        @relation(fields: [conversationId, sourceMessageId], references: [conversationId, id], onDelete: Cascade)
+  rascunho                  BotnextPedidoRascunho?
+  pedidoConfirmadoSnapshots BotnextPedidoConfirmadoSnapshot[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -597,8 +628,10 @@ model BotnextPedidoRascunho {
   // tenant: existência do tenant. extracao: FK composta (tenant_id, extracao_id)
   // garante que o rascunho e a extração são do mesmo tenant. A conversa/mensagem
   // do rascunho são obtidas via extracao.
-  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  extracao BotnextPedidoExtracao @relation(fields: [tenantId, extracaoId], references: [tenantId, id], onDelete: Cascade)
+  tenant             Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  extracao           BotnextPedidoExtracao            @relation(fields: [tenantId, extracaoId], references: [tenantId, id], onDelete: Cascade)
+  outboundMessages   BotnextOutboundMessage[]
+  confirmadoSnapshot BotnextPedidoConfirmadoSnapshot?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -607,11 +640,127 @@ model BotnextPedidoRascunho {
   // exigido pela relação 1:1 extracao e suporta o CASCADE da FK
   // (tenant_id, extracao_id) a partir de botnext_pedido_extracao.
   @@unique([tenantId, extracaoId])
+  @@unique([tenantId, id])
   // Idempotência do envio ao n8n (dispatchKey nulo não conflita no Postgres).
   @@unique([tenantId, dispatchKey])
   @@index([tenantId, status])
   @@index([status, dispatchLeaseUntil])
   @@map("botnext_pedido_rascunho")
+}
+
+enum BotnextOutboundStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  UNCERTAIN
+}
+
+enum BotnextOutboundKind {
+  TEXT
+  TEMPLATE
+}
+
+// Outbox durável para todo efeito HTTP direcionado ao BotNext. O payload não
+// contém credenciais; Authorization continua sendo obtida do ambiente.
+model BotnextOutboundMessage {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  botnextAccountId     String  @map("botnext_account_id") @db.Uuid
+  conversationId       String? @map("conversation_id") @db.Uuid
+  clienteId            String? @map("cliente_id") @db.Uuid
+  sourceWebhookEventId String? @map("source_webhook_event_id") @db.Uuid
+  pedidoRascunhoId     String? @map("pedido_rascunho_id") @db.Uuid
+
+  kind    BotnextOutboundKind
+  purpose String
+
+  idempotencyKey String @map("idempotency_key")
+  requestHash    String @map("request_hash")
+
+  fromPhoneNormalized String @map("from_phone_normalized")
+  toPhoneNormalized   String @map("to_phone_normalized")
+  payload             Json
+
+  status        BotnextOutboundStatus @default(PENDING)
+  fencingToken  BigInt                @default(0) @map("fencing_token")
+  claimToken    String?               @map("claim_token") @db.Uuid
+  claimWorker   String?               @map("claim_worker")
+  leaseUntil    DateTime?             @map("lease_until")
+  attempts      Int                   @default(0)
+  nextAttemptAt DateTime?             @default(now()) @map("next_attempt_at")
+
+  lastAttemptAt DateTime? @map("last_attempt_at")
+  startedAt     DateTime? @map("started_at")
+  sentAt        DateTime? @map("sent_at")
+  failedAt      DateTime? @map("failed_at")
+  uncertainAt   DateTime? @map("uncertain_at")
+
+  lastHttpStatus    Int?    @map("last_http_status")
+  providerMessageId String? @map("provider_message_id")
+  providerStatus    String? @map("provider_status")
+  errorCode         String? @map("error_code")
+  errorMessage      String? @map("error_message") @db.Text
+
+  tenant             Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  botnextAccount     BotnextAccount         @relation(fields: [tenantId, botnextAccountId], references: [tenantId, id], onDelete: Restrict)
+  conversation       BotnextConversation?   @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
+  cliente            Cliente?               @relation(fields: [tenantId, clienteId], references: [tenantId, id], onDelete: Restrict)
+  sourceWebhookEvent BotnextWebhookEvent?   @relation(fields: [tenantId, sourceWebhookEventId], references: [tenantId, id], onDelete: Restrict)
+  pedidoRascunho     BotnextPedidoRascunho? @relation(fields: [tenantId, pedidoRascunhoId], references: [tenantId, id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, idempotencyKey])
+  @@unique([tenantId, sourceWebhookEventId, purpose])
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([status, leaseUntil])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, conversationId, createdAt])
+  @@map("botnext_outbound_messages")
+}
+
+// Snapshot append-only do contrato entregue ao n8n. O lease, fencing,
+// tentativas e conclusão do dispatch continuam no rascunho já existente.
+model BotnextPedidoConfirmadoSnapshot {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  rascunhoId          String @map("rascunho_id") @db.Uuid
+  confirmationEventId String @map("confirmation_event_id") @db.Uuid
+  botnextAccountId    String @map("botnext_account_id") @db.Uuid
+  conversationId      String @map("conversation_id") @db.Uuid
+  extracaoId          String @map("extracao_id") @db.Uuid
+  clienteId           String @map("cliente_id") @db.Uuid
+
+  senderPhoneNormalized String @map("sender_phone_normalized")
+  clienteArbrainId      String @map("cliente_arbrain_id")
+
+  contractVersion   String   @map("contract_version")
+  keyVersion        String   @map("key_version")
+  dispatchKey       String   @map("dispatch_key")
+  payload           Json
+  payloadSha256     String   @map("payload_sha256")
+  confirmedRevision Int      @map("confirmed_revision")
+  confirmedAt       DateTime @map("confirmed_at")
+
+  tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  rascunho          BotnextPedidoRascunho @relation(fields: [tenantId, rascunhoId], references: [tenantId, id], onDelete: Restrict)
+  confirmationEvent BotnextWebhookEvent   @relation(fields: [tenantId, confirmationEventId], references: [tenantId, id], onDelete: Restrict)
+  botnextAccount    BotnextAccount        @relation(fields: [tenantId, botnextAccountId], references: [tenantId, id], onDelete: Restrict)
+  conversation      BotnextConversation   @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
+  extracao          BotnextPedidoExtracao @relation(fields: [tenantId, extracaoId], references: [tenantId, id], onDelete: Restrict)
+  cliente           Cliente               @relation(fields: [tenantId, clienteId], references: [tenantId, id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, rascunhoId])
+  @@unique([tenantId, dispatchKey])
+  @@unique([tenantId, confirmationEventId])
+  @@index([tenantId, confirmedAt])
+  @@map("botnext_pedido_confirmado_snapshots")
 }
 
 // Alias de produto: texto (normalizado) que resolve para exatamente um
